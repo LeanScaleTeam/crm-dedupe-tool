@@ -222,16 +222,20 @@ export default function ReviewClient({ scan, userId }: ReviewClientProps) {
             <div className="text-sm text-red-600 mr-2">{mergeError}</div>
           )}
 
-          {/* Merge Button */}
-          <button
-            onClick={handleMerge}
-            disabled={selectedSets.size === 0 || isMerging}
-            className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
-          >
-            {isMerging
-              ? 'Starting merge...'
-              : `Merge ${selectedSets.size} selected`}
-          </button>
+          {/* Merge Button — disabled for accounts (view-only dry-run) */}
+          {scan.object_type === 'accounts' ? (
+            <span className="px-4 py-2 bg-amber-100 text-amber-800 rounded-lg text-sm font-medium">
+              Dry-run — view only (no merge)
+            </span>
+          ) : (
+            <button
+              onClick={handleMerge}
+              disabled={selectedSets.size === 0 || isMerging}
+              className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {isMerging ? 'Starting merge...' : `Merge ${selectedSets.size} selected`}
+            </button>
+          )}
         </div>
 
         {/* Duplicate List */}

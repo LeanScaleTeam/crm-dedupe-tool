@@ -5,11 +5,17 @@ from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timezone
 
+from pathlib import Path
+
 from app.services.supabase_client import get_supabase
 from app.services.crm_factory import get_crm_services
 from app.services.dedup_engine import DuplicateDetector, WinnerSelector, FieldBlender
+from app.services.match_engine import MatchEngine, MatchProfile
 
 router = APIRouter()
+
+PROFILES_DIR = Path(__file__).resolve().parents[2] / "profiles"
+DEFAULT_ACCOUNT_PROFILE = "scandit/account_v3"
 
 
 class WinnerRule(BaseModel):
@@ -19,15 +25,91 @@ class WinnerRule(BaseModel):
 
 
 class ScanConfig(BaseModel):
-    object_type: str  # 'contacts', 'companies', 'deals'
-    winner_rules: List[WinnerRule]
+    object_type: str  # 'contacts', 'accounts', 'companies', 'deals', 'leads'
+    winner_rules: List[WinnerRule] = []
     confidence_threshold: float = 0.9
+    match_profile: Optional[str] = None  # e.g. 'scandit/account_v3' (accounts dry-run)
 
 
 class ScanRequest(BaseModel):
     user_id: str
     connection_id: str
     config: ScanConfig
+
+
+def _account_display(m: dict) -> dict:
+    """Map an account snapshot to a card-friendly shape (reuses the contact card)."""
+    name = m.get("Name") or "(no name)"
+    subtitle = " · ".join(
+        str(v) for v in [m.get("Website"), m.get("BillingCountryCode"), m.get("Vertical__c")] if v
+    )
+    return {**m, "id": m.get("Id"), "full_name": name, "company": name, "email": subtitle}
+
+
+async def run_account_scan(scan_id: str, user_id: str, connection_id: str, config: dict, supabase):
+    """Config-driven account dedupe — VIEW ONLY (dry-run). No Salesforce writes."""
+    from app.services.salesforce_accounts import SalesforceAccountsService
+
+    connection, _, _ = await get_crm_services(user_id, connection_id)
+    if not getattr(connection, "instance_url", None):
+        raise Exception("Account dry-run currently supports Salesforce connections only.")
+
+    accounts_service = SalesforceAccountsService(connection)
+    total = await accounts_service.get_total_accounts()
+
+    async def progress_callback(count: int):
+        progress = min(int((count / max(total, 1)) * 50), 50)
+        supabase.table("scans").update(
+            {"progress": progress, "records_scanned": count}
+        ).eq("id", scan_id).execute()
+
+    records = await accounts_service.get_all_accounts(progress_callback)
+    supabase.table("scans").update(
+        {"progress": 60, "records_scanned": len(records)}
+    ).eq("id", scan_id).execute()
+
+    profile_name = config.get("match_profile") or DEFAULT_ACCOUNT_PROFILE
+    profile_path = PROFILES_DIR / f"{profile_name}.json"
+    if not profile_path.exists():
+        raise Exception(f"Match profile not found: {profile_name}")
+    profile = MatchProfile.from_json(str(profile_path))
+
+    result = MatchEngine(profile).find_clusters(records)
+    dupe_clusters = [c for c in result.clusters if c.is_dupe]
+
+    for i, cluster in enumerate(dupe_clusters):
+        members = cluster.members
+        winner = _account_display(members[0])
+        losers = [_account_display(m) for m in members[1:]]
+        supabase.table("duplicate_sets").insert({
+            "id": str(uuid.uuid4()),
+            "scan_id": scan_id,
+            "confidence": round(cluster.confidence * 100, 2),
+            "winner_record_id": winner["id"],
+            "loser_record_ids": [l["id"] for l in losers],
+            "winner_data": winner,
+            "loser_data": losers,
+            "merged_preview": {
+                "dry_run": True,
+                "bucket": cluster.bucket,
+                "hierarchy_class": cluster.hierarchy_class,
+                "match_path": cluster.match_path,
+                "fingerprint": cluster.fingerprint,
+            },
+        }).execute()
+        if i % 25 == 0:
+            progress = 60 + int((i / max(len(dupe_clusters), 1)) * 40)
+            supabase.table("scans").update(
+                {"progress": progress, "duplicates_found": i + 1}
+            ).eq("id", scan_id).execute()
+
+    supabase.table("scans").update({
+        "status": "completed",
+        "progress": 100,
+        "duplicates_found": len(dupe_clusters),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+        "config": {**config, "engine_stats": result.stats},
+    }).eq("id", scan_id).execute()
 
 
 async def run_scan(scan_id: str, user_id: str, connection_id: str, config: dict):
@@ -42,6 +124,11 @@ async def run_scan(scan_id: str, user_id: str, connection_id: str, config: dict)
             "status": "running",
             "started_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", scan_id).execute()
+
+        # Accounts run the config-driven match engine as a view-only dry-run.
+        if config["object_type"] == "accounts":
+            await run_account_scan(scan_id, user_id, connection_id, config, supabase)
+            return
 
         # Get CRM services based on connection type
         connection, contacts_service, _ = await get_crm_services(user_id, connection_id)

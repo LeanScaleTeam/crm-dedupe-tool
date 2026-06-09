@@ -14,7 +14,7 @@ interface ScanConfigClientProps {
   connection: CrmConnection
 }
 
-type ObjectType = 'contacts' | 'companies' | 'deals'
+type ObjectType = 'contacts' | 'accounts' | 'companies' | 'deals'
 type WinnerRuleType = 'oldest_created' | 'most_recent' | 'most_associations' | 'custom_field' | 'none'
 
 interface WinnerRule {
@@ -25,8 +25,14 @@ interface WinnerRule {
 
 const OBJECT_TYPES: { value: ObjectType; label: string; description: string; available: boolean }[] = [
   { value: 'contacts', label: 'Contacts', description: 'People records in your CRM', available: true },
+  { value: 'accounts', label: 'Accounts', description: 'Organization records — config-driven match, view-only (dry-run)', available: true },
   { value: 'companies', label: 'Companies', description: 'Organization records', available: false },
   { value: 'deals', label: 'Deals', description: 'Sales pipeline records', available: false },
+]
+
+const ACCOUNT_PROFILES: { value: string; label: string }[] = [
+  { value: 'scandit/account_v3', label: 'Scandit — Name + Domain + Country, Vertical discriminator (V3)' },
+  { value: 'scandit/account_v2', label: 'Scandit — Name + Domain + Country (V2 baseline)' },
 ]
 
 const WINNER_RULES: { value: WinnerRuleType; label: string; description: string }[] = [
@@ -40,6 +46,7 @@ const WINNER_RULES: { value: WinnerRuleType; label: string; description: string 
 export default function ScanConfigClient({ userId, connection }: ScanConfigClientProps) {
   const router = useRouter()
   const [objectType, setObjectType] = useState<ObjectType>('contacts')
+  const [matchProfile, setMatchProfile] = useState<string>('scandit/account_v3')
   const [winnerRules, setWinnerRules] = useState<WinnerRule[]>([
     { type: 'oldest_created' },
     { type: 'most_associations' },
@@ -81,6 +88,7 @@ export default function ScanConfigClient({ userId, connection }: ScanConfigClien
             object_type: objectType,
             winner_rules: activeRules,
             confidence_threshold: confidenceThreshold / 100,
+            ...(objectType === 'accounts' ? { match_profile: matchProfile } : {}),
           },
         }),
       })
@@ -155,6 +163,26 @@ export default function ScanConfigClient({ userId, connection }: ScanConfigClien
               ))}
             </div>
           </div>
+
+          {/* Match Profile (accounts dry-run) */}
+          {objectType === 'accounts' && (
+            <div className="bg-white rounded-lg shadow p-6">
+              <h2 className="text-lg font-semibold text-gray-900 mb-2">Match Profile</h2>
+              <p className="text-sm text-gray-500 mb-4">
+                Accounts use a config-driven, client-specific matching profile (name + custom-field
+                discriminators + deterministic keys). This run is <strong>view-only</strong> — no records are merged.
+              </p>
+              <select
+                value={matchProfile}
+                onChange={(e) => setMatchProfile(e.target.value)}
+                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+              >
+                {ACCOUNT_PROFILES.map((p) => (
+                  <option key={p.value} value={p.value}>{p.label}</option>
+                ))}
+              </select>
+            </div>
+          )}
 
           {/* Winner Rules */}
           <div className="bg-white rounded-lg shadow p-6">
