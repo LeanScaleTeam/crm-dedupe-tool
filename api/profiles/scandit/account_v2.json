@@ -1,0 +1,25 @@
+{
+  "object_type": "account",
+  "version": "scandit-v2-name-domain-country",
+  "threshold": 0.92,
+  "id_role": "Id",
+  "fields": {
+    "name":     {"api": "Name", "normalizer": "legal_name"},
+    "domain":   {"api": "Website", "normalizer": "domain"},
+    "country":  {"api": "BillingCountryCode", "normalizer": "picklist"},
+    "vertical": {"api": "Vertical__c", "normalizer": "picklist"},
+    "netsuite_id": {"api": "SCD_NetSuite_ID__c", "normalizer": "as_is"},
+    "parent":   {"api": "ParentId", "normalizer": "as_is"},
+    "activity": {"api": "LastActivityDate", "normalizer": "as_is"},
+    "protect":  {"api": "SCD_NetSuite_Sync_Active__c", "normalizer": "as_is"}
+  },
+  "fingerprint": ["name", "domain", "country"],
+  "require_eligible": ["name", "domain", "country"],
+  "deterministic_keys": [{"role": "netsuite_id", "require_nonblank": true}],
+  "discriminators": [],
+  "filter_placeholder_names": ["name"],
+  "filter_freemail_domains": ["domain"],
+  "parent_role": "parent",
+  "activity_role": "activity",
+  "protect_role": "protect"
+}
