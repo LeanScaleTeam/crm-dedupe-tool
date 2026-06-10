@@ -14,11 +14,11 @@ export async function GET(request: Request) {
     return NextResponse.redirect(`${siteUrl}/connect?error=no_code`)
   }
 
-  // Get current user
+  // Get current user + session (the backend now authenticates via the access token)
   const supabase = await createClient()
-  const { data: { user } } = await supabase.auth.getUser()
+  const { data: { session } } = await supabase.auth.getSession()
 
-  if (!user) {
+  if (!session?.user) {
     return NextResponse.redirect(`${siteUrl}/login`)
   }
 
@@ -29,11 +29,11 @@ export async function GET(request: Request) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
+        Authorization: `Bearer ${session.access_token}`,
       },
       body: JSON.stringify({
         code,
         redirect_uri: `${siteUrl}/api/hubspot/callback`,
-        user_id: user.id,
       }),
     })
 

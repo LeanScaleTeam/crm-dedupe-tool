@@ -10,6 +10,10 @@ class Settings(BaseSettings):
     # Supabase
     supabase_url: str
     supabase_service_key: str  # Service role key for backend operations
+    # JWT secret for verifying Supabase access tokens (Project Settings → API →
+    # JWT Settings). Required to authenticate requests; endpoints fail closed if
+    # this is unset. See app/auth.py.
+    supabase_jwt_secret: str = ""
 
     # Redis (for Celery)
     redis_url: str = "redis://localhost:6379/0"

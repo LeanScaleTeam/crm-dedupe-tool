@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
+import { apiFetch } from '@/lib/api'
 
 interface Report {
   id: string
@@ -28,7 +29,7 @@ interface ReportsClientProps {
   userId: string
 }
 
-export default function ReportsClient({ userId }: ReportsClientProps) {
+export default function ReportsClient({}: ReportsClientProps) {
   const router = useRouter()
   const [reports, setReports] = useState<Report[]>([])
   const [isLoading, setIsLoading] = useState(true)
@@ -37,13 +38,12 @@ export default function ReportsClient({ userId }: ReportsClientProps) {
 
   useEffect(() => {
     fetchReports()
-  }, [page, userId])
+  }, [page])
 
   const fetchReports = async () => {
     setIsLoading(true)
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-      const response = await fetch(`${apiUrl}/reports/user/${userId}?page=${page}`)
+      const response = await apiFetch(`/reports/mine?page=${page}`)
 
       if (response.ok) {
         const data = await response.json()
@@ -58,10 +58,8 @@ export default function ReportsClient({ userId }: ReportsClientProps) {
   }
 
   const downloadPdf = async (reportId: string) => {
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-
     try {
-      const response = await fetch(`${apiUrl}/reports/${reportId}/pdf`)
+      const response = await apiFetch(`/reports/${reportId}/pdf`)
 
       if (response.ok) {
         const blob = await response.blob()

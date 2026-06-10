@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useCallback } from 'react'
+import { apiFetch } from '@/lib/api'
 
 interface Contact {
   id?: string
@@ -105,9 +106,8 @@ export default function DuplicateDetail({
   const savePreview = useCallback(async () => {
     setIsSaving(true)
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-      const response = await fetch(
-        `${apiUrl}/scan/${scanId}/duplicate-sets/${duplicateSet.id}`,
+      const response = await apiFetch(
+        `/scan/${scanId}/duplicate-sets/${duplicateSet.id}`,
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },

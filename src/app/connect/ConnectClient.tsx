@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { createClient } from '@/lib/supabase/client'
+import { apiFetch } from '@/lib/api'
 import type { User } from '@supabase/supabase-js'
 
 interface CrmConnection {
@@ -53,8 +54,7 @@ export default function ConnectClient({ user, existingConnection, oauthError, oa
     setIsLoading(true)
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-      await fetch(`${apiUrl}/${existingConnection.crm_type}/disconnect/${user.id}`, {
+      await apiFetch(`/${existingConnection.crm_type}/disconnect`, {
         method: 'DELETE',
       })
     } catch (error) {

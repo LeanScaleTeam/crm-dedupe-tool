@@ -2,6 +2,7 @@
 
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
+import { apiFetch } from '@/lib/api'
 
 interface CrmConnection {
   id: string
@@ -43,7 +44,7 @@ const WINNER_RULES: { value: WinnerRuleType; label: string; description: string 
   { value: 'none', label: 'None', description: 'Skip this priority level' },
 ]
 
-export default function ScanConfigClient({ userId, connection }: ScanConfigClientProps) {
+export default function ScanConfigClient({ connection }: ScanConfigClientProps) {
   const router = useRouter()
   const [objectType, setObjectType] = useState<ObjectType>('contacts')
   const [matchProfile, setMatchProfile] = useState<string>('scandit/account_v3')
@@ -67,8 +68,6 @@ export default function ScanConfigClient({ userId, connection }: ScanConfigClien
     setError(null)
 
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-
       // Filter out 'none' rules
       const activeRules = winnerRules
         .filter(r => r.type !== 'none')
@@ -78,11 +77,10 @@ export default function ScanConfigClient({ userId, connection }: ScanConfigClien
           field_value: r.customValue || null,
         }))
 
-      const response = await fetch(`${apiUrl}/scan/start`, {
+      const response = await apiFetch(`/scan/start`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          user_id: userId,
           connection_id: connection.id,
           config: {
             object_type: objectType,

@@ -45,10 +45,11 @@ class ReportService:
         Returns:
             Dict with report data
         """
-        # Get merge details
+        # Get merge details — scoped to the owner (defense in depth; the router
+        # also checks ownership).
         merge_result = self.supabase.table("merges").select("*").eq(
             "id", merge_id
-        ).single().execute()
+        ).eq("user_id", user_id).single().execute()
 
         if not merge_result.data:
             raise Exception("Merge not found")
@@ -124,20 +125,22 @@ class ReportService:
 
         return report_id
 
-    async def generate_pdf(self, report_id: str) -> bytes:
+    async def generate_pdf(self, report_id: str, user_id: str) -> bytes:
         """
         Generate PDF from report data.
 
         Args:
             report_id: The report ID
+            user_id: The owner (report is scoped to this user — defense in depth)
 
         Returns:
             PDF bytes
         """
-        # Get report
+        # Get report — scoped to the owner so the ID alone can't leak another
+        # user's report even if a future caller skips the router check.
         result = self.supabase.table("reports").select("*").eq(
             "id", report_id
-        ).single().execute()
+        ).eq("user_id", user_id).single().execute()
 
         if not result.data:
             raise Exception("Report not found")

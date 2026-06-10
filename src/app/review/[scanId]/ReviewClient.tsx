@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
+import { apiFetch } from '@/lib/api'
 import DuplicateCard from '@/components/DuplicateCard'
 import DuplicateDetail from '@/components/DuplicateDetail'
 
@@ -33,7 +34,7 @@ interface ReviewClientProps {
 
 type ConfidenceFilter = 'all' | 'high' | 'medium' | 'low'
 
-export default function ReviewClient({ scan, userId }: ReviewClientProps) {
+export default function ReviewClient({ scan }: ReviewClientProps) {
   const router = useRouter()
   const [duplicateSets, setDuplicateSets] = useState<DuplicateSet[]>([])
   const [selectedSets, setSelectedSets] = useState<Set<string>>(new Set())
@@ -52,8 +53,7 @@ export default function ReviewClient({ scan, userId }: ReviewClientProps) {
   const fetchDuplicates = async () => {
     setIsLoading(true)
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-      const response = await fetch(`${apiUrl}/scan/${scan.id}/results?page=${page}&per_page=20`)
+      const response = await apiFetch(`/scan/${scan.id}/results?page=${page}&per_page=20`)
 
       if (response.ok) {
         const data = await response.json()
@@ -101,8 +101,7 @@ export default function ReviewClient({ scan, userId }: ReviewClientProps) {
     }
 
     // Persist to backend
-    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-    await fetch(`${apiUrl}/scan/${scan.id}/duplicate-sets/${setId}`, {
+    await apiFetch(`/scan/${scan.id}/duplicate-sets/${setId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ excluded }),
@@ -115,14 +114,38 @@ export default function ReviewClient({ scan, userId }: ReviewClientProps) {
     setIsMerging(true)
     setMergeError(null)
     try {
-      const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-      const response = await fetch(`${apiUrl}/merge/execute`, {
+      const ids = Array.from(selectedSets)
+
+      // The backend only merges APPROVED sets. Selecting sets and clicking
+      // "Merge" IS the human approval, so record it before executing. If ANY
+      // approval fails, abort before /execute — otherwise the sets that DID get
+      // approved would be left eligible and a later merge could sweep them in
+      // unintentionally.
+      const approvals = await Promise.allSettled(
+        ids.map(setId =>
+          apiFetch(`/scan/${scan.id}/duplicate-sets/${setId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ decision: 'approved' }),
+          }).then(r => {
+            if (!r.ok) throw new Error(`approve ${setId} failed (${r.status})`)
+          })
+        )
+      )
+      const failedApprovals = approvals.filter(a => a.status === 'rejected').length
+      if (failedApprovals > 0) {
+        setMergeError(
+          `Couldn't approve ${failedApprovals} of ${ids.length} selected sets — nothing was merged. Please retry.`
+        )
+        return
+      }
+
+      const response = await apiFetch(`/merge/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           scan_id: scan.id,
-          user_id: userId,
-          set_ids: Array.from(selectedSets),
+          set_ids: ids,
         }),
       })
 

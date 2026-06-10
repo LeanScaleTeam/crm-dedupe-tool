@@ -2,6 +2,7 @@
 
 import { useState, useEffect, use } from 'react'
 import { useRouter } from 'next/navigation'
+import { apiFetch } from '@/lib/api'
 
 interface MergePageProps {
   params: Promise<{ mergeId: string }>
@@ -31,8 +32,7 @@ export default function MergePage({ params }: MergePageProps) {
 
     const pollStatus = async () => {
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-        const response = await fetch(`${apiUrl}/merge/${mergeId}/status`)
+        const response = await apiFetch(`/merge/${mergeId}/status`)
 
         if (response.ok) {
           const data = await response.json()
@@ -44,13 +44,18 @@ export default function MergePage({ params }: MergePageProps) {
         }
       } catch (error) {
         console.error('Failed to poll status:', error)
+        // Session dropped — stop the silent retry loop and re-auth.
+        if (error instanceof Error && error.message.includes('Not authenticated')) {
+          setIsPolling(false)
+          router.push('/login')
+        }
       }
     }
 
     pollStatus()
     const interval = setInterval(pollStatus, 2000)
     return () => clearInterval(interval)
-  }, [isPolling, mergeId])
+  }, [isPolling, mergeId, router])
 
   const getProgress = () => {
     if (!merge || merge.total_sets === 0) return 0
@@ -173,9 +178,8 @@ export default function MergePage({ params }: MergePageProps) {
                   setIsGeneratingReport(true)
                   setReportError(null)
                   try {
-                    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-                    const response = await fetch(
-                      `${apiUrl}/reports/generate/${mergeId}?user_id=${encodeURIComponent(merge.id)}`,
+                    const response = await apiFetch(
+                      `/reports/generate/${mergeId}`,
                       { method: 'POST' }
                     )
                     if (response.ok) {

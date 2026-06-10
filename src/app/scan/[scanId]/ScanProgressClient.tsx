@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
+import { apiFetch } from '@/lib/api'
 
 interface Scan {
   id: string
@@ -35,8 +36,7 @@ export default function ScanProgressClient({ scan: initialScan }: ScanProgressCl
 
     const pollStatus = async () => {
       try {
-        const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000'
-        const response = await fetch(`${apiUrl}/scan/${scan.id}/status`)
+        const response = await apiFetch(`/scan/${scan.id}/status`)
 
         if (response.ok) {
           const data = await response.json()
@@ -51,6 +51,11 @@ export default function ScanProgressClient({ scan: initialScan }: ScanProgressCl
         }
       } catch (error) {
         console.error('Failed to poll status:', error)
+        // Session dropped — stop the silent retry loop and re-auth.
+        if (error instanceof Error && error.message.includes('Not authenticated')) {
+          setIsPolling(false)
+          router.push('/login')
+        }
       }
     }
 

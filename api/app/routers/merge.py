@@ -1,10 +1,11 @@
 """Merge endpoints for executing duplicate merges."""
 import uuid
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timezone
 
+from app.auth import require_user
 from app.services.supabase_client import get_supabase
 from app.services.crm_factory import get_crm_services
 from app.services.reports import ReportService
@@ -14,8 +15,33 @@ router = APIRouter()
 
 class MergeRequest(BaseModel):
     scan_id: str
-    user_id: str
-    set_ids: Optional[List[str]] = None  # If None, merge all non-excluded
+    # set_ids: which approved sets to merge. None = "all currently-approved sets"
+    # for this scan. It NO LONGER means "all non-excluded" — only sets a human/gate
+    # has explicitly approved (decision='approved') are ever merged.
+    set_ids: Optional[List[str]] = None
+
+
+def _assert_scan_owner(supabase, scan_id: str, user_id: str) -> dict:
+    """Verify the scan exists AND belongs to user_id. Returns the scan row.
+
+    The backend uses the service-role key (RLS bypassed), so ownership must be
+    checked explicitly here — a verified token alone does not scope data access.
+    """
+    res = supabase.table("scans").select("*").eq("id", scan_id).eq(
+        "user_id", user_id
+    ).single().execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return res.data
+
+
+# A duplicate set may be merged only if it is approved and not already
+# excluded/merged. This is the server-side gate — callers cannot bypass it by
+# supplying set_ids.
+def _approved_set_query(supabase, scan_id: str):
+    return supabase.table("duplicate_sets").select("*").eq(
+        "scan_id", scan_id
+    ).eq("decision", "approved").eq("excluded", False).eq("merged", False)
 
 
 async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str]):
@@ -44,10 +70,12 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
         # Get CRM services based on connection type
         _, _, merge_service = await get_crm_services(user_id, connection_id)
 
-        # Get duplicate sets to merge
+        # Get duplicate sets to merge — re-assert the approval gate here (defence
+        # in depth: never merge a set that isn't approved, even if its id was
+        # queued earlier and approval was since revoked).
         sets_result = supabase.table("duplicate_sets").select("*").in_(
             "id", set_ids
-        ).eq("excluded", False).eq("merged", False).execute()
+        ).eq("decision", "approved").eq("excluded", False).eq("merged", False).execute()
 
         duplicate_sets = sets_result.data or []
         total_sets = len(duplicate_sets)
@@ -59,13 +87,18 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
             }).eq("id", merge_id).execute()
             return
 
-        # Prepare merge operations
+        # Prepare merge operations. Skip loser ids Salesforce already absorbed on a
+        # prior (partial) run so we never re-merge a deleted record.
         merge_operations = []
         for dup_set in duplicate_sets:
+            already = set(dup_set.get("merged_loser_ids") or [])
+            remaining = [l for l in dup_set["loser_record_ids"] if l not in already]
             merge_operations.append({
                 "set_id": dup_set["id"],
                 "winner_id": dup_set["winner_record_id"],
-                "loser_ids": dup_set["loser_record_ids"],
+                "loser_ids": remaining,
+                "already_merged": list(already),
+                "all_loser_ids": list(dup_set["loser_record_ids"]),  # full original set
                 "blended_properties": dup_set.get("merged_preview", {}),
             })
 
@@ -83,6 +116,16 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
             if merge_check.data and merge_check.data["status"] == "paused":
                 break
 
+            # Nothing left to merge for this set (all losers absorbed on a prior
+            # run) — mark it done without another CRM round-trip.
+            if not op["loser_ids"]:
+                completed += 1
+                supabase.table("duplicate_sets").update({
+                    "merged": True, "decision": "merged",
+                    "merged_loser_ids": sorted(op["already_merged"]),
+                }).eq("id", op["set_id"]).execute()
+                continue
+
             # Execute merge
             result = await merge_service.merge_duplicate_set(
                 winner_id=op["winner_id"],
@@ -90,16 +133,34 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
                 blended_properties=op.get("blended_properties"),
             )
 
+            # Record exactly which losers the CRM absorbed, even on failure —
+            # those deletions/archives are irreversible (SF) or recoverable-but-
+            # not-to-be-repeated (HubSpot) and must not be re-attempted.
+            newly_absorbed = result.get("merged_loser_ids", [])
+            all_absorbed = sorted(set(op["already_merged"]) | set(newly_absorbed))
+            set_update = {"merged_loser_ids": all_absorbed}
+
+            # merged=True ONLY when every original loser is gone — not merely when
+            # the current batch succeeded. Decouples the completion signal from a
+            # single batch's success.
+            fully_merged = result["success"] and set(all_absorbed) == set(op["all_loser_ids"])
+
             if result["success"]:
                 completed += 1
-                # Mark set as merged
-                supabase.table("duplicate_sets").update({
-                    "merged": True
-                }).eq("id", op["set_id"]).execute()
             else:
                 failed += 1
+                # Partial progress is preserved via merged_loser_ids; the set stays
+                # unmerged so a resume retries only the remaining losers.
                 for err in result["errors"]:
                     error_log.append({"set_id": op["set_id"], "error": err})
+
+            if fully_merged:
+                set_update["merged"] = True
+                set_update["decision"] = "merged"
+
+            supabase.table("duplicate_sets").update(set_update).eq(
+                "id", op["set_id"]
+            ).execute()
 
             # Update progress
             supabase.table("merges").update({
@@ -142,31 +203,45 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
 
 
 @router.post("/execute")
-async def execute_merge(request: MergeRequest, background_tasks: BackgroundTasks):
-    """Start merge execution for selected duplicate sets."""
-    supabase = get_supabase()
+async def execute_merge(
+    request: MergeRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(require_user),
+):
+    """Start merge execution for APPROVED duplicate sets in this scan.
 
-    # Get duplicate sets (either specified or all non-excluded)
-    if request.set_ids:
-        sets_result = supabase.table("duplicate_sets").select("id").eq(
-            "scan_id", request.scan_id
-        ).in_("id", request.set_ids).eq("excluded", False).eq("merged", False).execute()
-    else:
-        sets_result = supabase.table("duplicate_sets").select("id").eq(
-            "scan_id", request.scan_id
-        ).eq("excluded", False).eq("merged", False).execute()
+    Safety invariants (Phase 0):
+      - the caller is authenticated and owns the scan;
+      - only sets with decision='approved' are ever merged — set_ids that are not
+        approved are ignored, and set_ids=None means "all approved sets", NOT
+        "all non-excluded".
+    """
+    supabase = get_supabase()
+    _assert_scan_owner(supabase, request.scan_id, user_id)
+
+    # The gate: approved, not excluded, not merged. Optionally narrowed to the
+    # caller's set_ids — but never widened past it.
+    query = _approved_set_query(supabase, request.scan_id).select("id")
+    if request.set_ids is not None:
+        if not request.set_ids:
+            raise HTTPException(status_code=400, detail="set_ids was empty.")
+        query = query.in_("id", request.set_ids)
+    sets_result = query.execute()
 
     set_ids = [s["id"] for s in (sets_result.data or [])]
 
     if len(set_ids) == 0:
-        raise HTTPException(status_code=400, detail="No duplicate sets to merge")
+        raise HTTPException(
+            status_code=400,
+            detail="No approved duplicate sets to merge. Approve sets first.",
+        )
 
     # Create merge record
     merge_id = str(uuid.uuid4())
     merge_data = {
         "id": merge_id,
         "scan_id": request.scan_id,
-        "user_id": request.user_id,
+        "user_id": user_id,
         "status": "pending",
         "total_sets": len(set_ids),
         "completed_sets": 0,
@@ -179,7 +254,7 @@ async def execute_merge(request: MergeRequest, background_tasks: BackgroundTasks
     background_tasks.add_task(
         run_merge,
         merge_id,
-        request.user_id,
+        user_id,
         request.scan_id,
         set_ids,
     )
@@ -187,17 +262,21 @@ async def execute_merge(request: MergeRequest, background_tasks: BackgroundTasks
     return {"merge_id": merge_id, "status": "pending", "total_sets": len(set_ids)}
 
 
+def _assert_merge_owner(supabase, merge_id: str, user_id: str) -> dict:
+    res = supabase.table("merges").select("*").eq("id", merge_id).eq(
+        "user_id", user_id
+    ).single().execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Merge not found")
+    return res.data
+
+
 @router.get("/{merge_id}/status")
-async def get_merge_status(merge_id: str):
+async def get_merge_status(merge_id: str, user_id: str = Depends(require_user)):
     """Get current merge progress and status."""
     supabase = get_supabase()
 
-    result = supabase.table("merges").select("*").eq("id", merge_id).single().execute()
-
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Merge not found")
-
-    merge = result.data
+    merge = _assert_merge_owner(supabase, merge_id, user_id)
     return {
         "id": merge["id"],
         "status": merge["status"],
@@ -211,17 +290,12 @@ async def get_merge_status(merge_id: str):
 
 
 @router.post("/{merge_id}/pause")
-async def pause_merge(merge_id: str):
+async def pause_merge(merge_id: str, user_id: str = Depends(require_user)):
     """Pause an in-progress merge."""
     supabase = get_supabase()
 
-    # Check current status
-    result = supabase.table("merges").select("status").eq("id", merge_id).single().execute()
-
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Merge not found")
-
-    if result.data["status"] != "running":
+    merge = _assert_merge_owner(supabase, merge_id, user_id)
+    if merge["status"] != "running":
         raise HTTPException(status_code=400, detail="Merge is not running")
 
     # Set to paused - the background task will check this
@@ -233,25 +307,21 @@ async def pause_merge(merge_id: str):
 
 
 @router.post("/{merge_id}/resume")
-async def resume_merge(merge_id: str, background_tasks: BackgroundTasks):
+async def resume_merge(
+    merge_id: str,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(require_user),
+):
     """Resume a paused merge."""
     supabase = get_supabase()
 
-    # Get merge details
-    result = supabase.table("merges").select("*").eq("id", merge_id).single().execute()
-
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Merge not found")
-
-    merge = result.data
+    merge = _assert_merge_owner(supabase, merge_id, user_id)
 
     if merge["status"] != "paused":
         raise HTTPException(status_code=400, detail="Merge is not paused")
 
-    # Get remaining sets to merge
-    sets_result = supabase.table("duplicate_sets").select("id").eq(
-        "scan_id", merge["scan_id"]
-    ).eq("excluded", False).eq("merged", False).execute()
+    # Get remaining APPROVED sets to merge (same gate as execute).
+    sets_result = _approved_set_query(supabase, merge["scan_id"]).select("id").execute()
 
     set_ids = [s["id"] for s in (sets_result.data or [])]
 

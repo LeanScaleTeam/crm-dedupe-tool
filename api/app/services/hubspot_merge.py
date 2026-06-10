@@ -164,29 +164,40 @@ class HubSpotMergeService:
             blended_properties: Optional dict of properties to update on winner
 
         Returns:
-            Dict with overall merge result
+            {success, merged_loser_ids, merged_count, errors} — same contract as
+            SalesforceMergeService so the CRM-agnostic run_merge can record real
+            partial-merge progress and never re-attempt an already-archived loser
+            on resume. (HubSpot merges are soft-archives and recoverable, but the
+            accounting must still be correct.)
         """
-        errors = []
-
-        # Step 1: Update winner with blended fields (fill gaps)
+        # Step 1: Update winner with blended fields (fill gaps). If this fails,
+        # do NOT merge — losers would be archived before their gap-fill lands.
         if blended_properties:
             update_result = await self.update_contact(winner_id, blended_properties)
             if not update_result["success"]:
-                errors.append(f"Failed to update winner: {update_result['error']}")
-                # Continue anyway - merge might still work
+                return {
+                    "success": False,
+                    "merged_loser_ids": [],
+                    "merged_count": 0,
+                    "errors": [f"Failed to update winner: {update_result['error']}"],
+                }
 
-        # Step 2: Merge each loser
+        # Step 2: Merge each loser; record which ones succeeded and STOP on the
+        # first failure (mirrors the Salesforce-side invariant).
+        absorbed: list[str] = []
+        errors: list[str] = []
         for loser_id in loser_ids:
-            # Rate limiting
             await asyncio.sleep(self.RATE_LIMIT_DELAY)
-
             merge_result = await self.merge_contacts(winner_id, loser_id)
             if not merge_result["success"]:
                 errors.append(f"Failed to merge {loser_id}: {merge_result['error']}")
+                break
+            absorbed.append(loser_id)
 
         return {
             "success": len(errors) == 0,
-            "merged_count": len(loser_ids) - len([e for e in errors if "merge" in e]),
+            "merged_loser_ids": absorbed,
+            "merged_count": len(absorbed),
             "errors": errors,
         }
 

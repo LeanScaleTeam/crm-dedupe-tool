@@ -1,12 +1,13 @@
 """Scan endpoints for duplicate detection."""
 import uuid
-from fastapi import APIRouter, HTTPException, BackgroundTasks
+from fastapi import APIRouter, HTTPException, BackgroundTasks, Depends
 from pydantic import BaseModel
 from typing import List, Optional
 from datetime import datetime, timezone
 
 from pathlib import Path
 
+from app.auth import require_user
 from app.services.supabase_client import get_supabase
 from app.services.crm_factory import get_crm_services
 from app.services.dedup_engine import DuplicateDetector, WinnerSelector, FieldBlender
@@ -32,9 +33,19 @@ class ScanConfig(BaseModel):
 
 
 class ScanRequest(BaseModel):
-    user_id: str
     connection_id: str
     config: ScanConfig
+
+
+def _assert_scan_owner(supabase, scan_id: str, user_id: str) -> dict:
+    """Verify the scan exists AND belongs to user_id (RLS is bypassed by the
+    service-role client, so ownership is checked explicitly)."""
+    res = supabase.table("scans").select("*").eq("id", scan_id).eq(
+        "user_id", user_id
+    ).single().execute()
+    if not res.data:
+        raise HTTPException(status_code=404, detail="Scan not found")
+    return res.data
 
 
 def _account_display(m: dict) -> dict:
@@ -91,6 +102,9 @@ async def run_account_scan(scan_id: str, user_id: str, connection_id: str, confi
             "loser_data": losers,
             "merged_preview": {
                 "dry_run": True,
+                "verification_status": cluster.verification_status,
+                "certainty": cluster.certainty,
+                "verification_reason": cluster.verification_reason,
                 "bucket": cluster.bucket,
                 "hierarchy_class": cluster.hierarchy_class,
                 "match_path": cluster.match_path,
@@ -217,14 +231,18 @@ async def run_scan(scan_id: str, user_id: str, connection_id: str, config: dict)
 
 
 @router.post("/start")
-async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
+async def start_scan(
+    request: ScanRequest,
+    background_tasks: BackgroundTasks,
+    user_id: str = Depends(require_user),
+):
     """Start a new duplicate detection scan."""
     supabase = get_supabase()
 
-    # Validate connection exists
+    # Validate connection exists AND belongs to the authenticated user.
     conn_result = supabase.table("crm_connections").select("*").eq(
         "id", request.connection_id
-    ).eq("user_id", request.user_id).single().execute()
+    ).eq("user_id", user_id).single().execute()
 
     if not conn_result.data:
         raise HTTPException(status_code=404, detail="Connection not found")
@@ -233,7 +251,7 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     scan_id = str(uuid.uuid4())
     scan_data = {
         "id": scan_id,
-        "user_id": request.user_id,
+        "user_id": user_id,
         "connection_id": request.connection_id,
         "object_type": request.config.object_type,
         "status": "pending",
@@ -252,7 +270,7 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
     background_tasks.add_task(
         run_scan,
         scan_id,
-        request.user_id,
+        user_id,
         request.connection_id,
         config_dict,
     )
@@ -261,16 +279,11 @@ async def start_scan(request: ScanRequest, background_tasks: BackgroundTasks):
 
 
 @router.get("/{scan_id}/status")
-async def get_scan_status(scan_id: str):
+async def get_scan_status(scan_id: str, user_id: str = Depends(require_user)):
     """Get current scan progress and status."""
     supabase = get_supabase()
 
-    result = supabase.table("scans").select("*").eq("id", scan_id).single().execute()
-
-    if not result.data:
-        raise HTTPException(status_code=404, detail="Scan not found")
-
-    scan = result.data
+    scan = _assert_scan_owner(supabase, scan_id, user_id)
     return {
         "id": scan["id"],
         "status": scan["status"],
@@ -284,17 +297,17 @@ async def get_scan_status(scan_id: str):
 
 
 @router.get("/{scan_id}/results")
-async def get_scan_results(scan_id: str, page: int = 1, per_page: int = 50):
+async def get_scan_results(
+    scan_id: str,
+    page: int = 1,
+    per_page: int = 50,
+    user_id: str = Depends(require_user),
+):
     """Get paginated duplicate sets from completed scan."""
     supabase = get_supabase()
 
-    # Get scan to verify it exists and is completed
-    scan_result = supabase.table("scans").select("*").eq("id", scan_id).single().execute()
-
-    if not scan_result.data:
-        raise HTTPException(status_code=404, detail="Scan not found")
-
-    scan = scan_result.data
+    # Verify the scan exists and belongs to the authenticated user.
+    scan = _assert_scan_owner(supabase, scan_id, user_id)
 
     # Get duplicate sets with pagination
     offset = (page - 1) * per_page
@@ -323,27 +336,53 @@ async def get_scan_results(scan_id: str, page: int = 1, per_page: int = 50):
 class UpdateDuplicateSetRequest(BaseModel):
     excluded: Optional[bool] = None
     merged_preview: Optional[dict] = None
+    # The reviewer's decision. 'approved' is the ONLY way a set becomes mergeable
+    # (the merge executor refuses anything that isn't approved).
+    decision: Optional[str] = None  # 'approved' | 'excluded' | 'escalated' | 'pending'
+
+
+_ALLOWED_DECISIONS = {"approved", "excluded", "escalated", "pending"}
 
 
 @router.patch("/{scan_id}/duplicate-sets/{set_id}")
-async def update_duplicate_set(scan_id: str, set_id: str, request: UpdateDuplicateSetRequest):
-    """Update a duplicate set's excluded status or merged preview."""
+async def update_duplicate_set(
+    scan_id: str,
+    set_id: str,
+    request: UpdateDuplicateSetRequest,
+    user_id: str = Depends(require_user),
+):
+    """Update a duplicate set: exclude it, edit the blended preview, or record a
+    review decision (approve / exclude / escalate). Approval is what gates merge."""
     supabase = get_supabase()
+    _assert_scan_owner(supabase, scan_id, user_id)
 
-    update_data = {}
+    update_data: dict = {}
     if request.excluded is not None:
         update_data["excluded"] = request.excluded
+        # Keep decision consistent with an explicit exclude/include toggle.
+        update_data["decision"] = "excluded" if request.excluded else "pending"
     if request.merged_preview is not None:
         update_data["merged_preview"] = request.merged_preview
+    if request.decision is not None:
+        if request.decision not in _ALLOWED_DECISIONS:
+            raise HTTPException(status_code=400, detail="Invalid decision.")
+        update_data["decision"] = request.decision
+        update_data["decided_by"] = user_id
+        update_data["decided_at"] = datetime.now(timezone.utc).isoformat()
+        if request.decision == "excluded":
+            update_data["excluded"] = True
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
 
+    # A set that's already been merged is immutable — never reopen it.
     result = supabase.table("duplicate_sets").update(
         update_data
-    ).eq("id", set_id).eq("scan_id", scan_id).execute()
+    ).eq("id", set_id).eq("scan_id", scan_id).eq("merged", False).execute()
 
     if not result.data:
-        raise HTTPException(status_code=404, detail="Duplicate set not found")
+        raise HTTPException(
+            status_code=404, detail="Duplicate set not found (or already merged)."
+        )
 
     return result.data[0]

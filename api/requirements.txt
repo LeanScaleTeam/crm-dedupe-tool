@@ -19,6 +19,9 @@ httpx==0.25.2
 # Encryption
 cryptography==42.0.2
 
+# Auth — verify Supabase access-token JWTs
+PyJWT==2.8.0
+
 # Environment and config
 python-dotenv==1.0.1
 pydantic==2.6.1

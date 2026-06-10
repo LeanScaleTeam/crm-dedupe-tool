@@ -1,8 +1,9 @@
 """Salesforce OAuth and API endpoints."""
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from typing import Optional
 
+from app.auth import require_user
 from app.services.salesforce import SalesforceService
 
 router = APIRouter()
@@ -11,7 +12,6 @@ router = APIRouter()
 class TokenExchangeRequest(BaseModel):
     code: str
     redirect_uri: str
-    user_id: str
 
 
 class ConnectionStatusResponse(BaseModel):
@@ -22,8 +22,10 @@ class ConnectionStatusResponse(BaseModel):
 
 
 @router.post("/exchange-token")
-async def exchange_token(request: TokenExchangeRequest):
-    """Exchange OAuth code for access token and save connection."""
+async def exchange_token(
+    request: TokenExchangeRequest, user_id: str = Depends(require_user)
+):
+    """Exchange OAuth code for access token and save connection for the caller."""
     service = SalesforceService()
 
     try:
@@ -38,7 +40,7 @@ async def exchange_token(request: TokenExchangeRequest):
 
         # Save connection
         connection = await service.save_connection(
-            user_id=request.user_id,
+            user_id=user_id,
             tokens=tokens,
             org_id=org_id,
         )
@@ -54,9 +56,11 @@ async def exchange_token(request: TokenExchangeRequest):
         raise HTTPException(status_code=400, detail=str(e))
 
 
-@router.get("/connection-status/{user_id}")
-async def connection_status(user_id: str) -> ConnectionStatusResponse:
-    """Check if user has valid Salesforce connection."""
+@router.get("/connection-status")
+async def connection_status(
+    user_id: str = Depends(require_user),
+) -> ConnectionStatusResponse:
+    """Check if the authenticated user has a valid Salesforce connection."""
     service = SalesforceService()
 
     try:
@@ -80,9 +84,9 @@ async def connection_status(user_id: str) -> ConnectionStatusResponse:
         )
 
 
-@router.delete("/disconnect/{user_id}")
-async def disconnect(user_id: str):
-    """Disconnect Salesforce for a user."""
+@router.delete("/disconnect")
+async def disconnect(user_id: str = Depends(require_user)):
+    """Disconnect Salesforce for the authenticated user."""
     service = SalesforceService()
 
     try:

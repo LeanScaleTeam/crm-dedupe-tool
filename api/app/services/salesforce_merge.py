@@ -32,49 +32,59 @@ class SalesforceMergeService:
         """
         Merge contacts using Salesforce's Merge API.
 
-        The master record is kept, and merge records are deleted.
-        Related records are re-parented to the master.
+        The master record is kept, and merge records are deleted. Related records
+        are re-parented to the master. Salesforce merges at most 2 records per
+        call, so N losers take ceil(N/2) sequential calls.
+
+        IMPORTANT (partial-merge correctness): each successful call IRREVERSIBLY
+        deletes its loser records. If a later batch fails, the earlier batches'
+        deletions have already happened. We therefore report exactly which loser
+        ids were absorbed so the caller can (a) record real progress and
+        (b) never re-attempt an already-deleted id on resume. The previous
+        implementation recursed and returned only the LAST batch's result, so a
+        partial success was silently reported as a total failure.
 
         Args:
             master_id: Salesforce ID of the contact to keep (master)
-            merge_ids: List of Salesforce IDs to merge into master (max 2)
+            merge_ids: List of Salesforce IDs to merge into master
 
         Returns:
-            Dict with merge result
+            {success: bool, absorbed_ids: list[str], errors: list[str]}
         """
-        # Salesforce merge endpoint only supports merging up to 2 records at a time
-        # For more, we need to do multiple merge calls
+        absorbed: list[str] = []
+        errors: list[str] = []
 
         async with httpx.AsyncClient() as client:
-            # Salesforce Merge REST API: POST /sobjects/Contact/merge
-            # Body: masterRecord with Id, plus up to 2 recordToMergeIds
-            batch = merge_ids[:2]  # Salesforce allows max 2 per call
-            response = await client.post(
-                f"{self.instance_url}/services/data/v59.0/sobjects/Contact/merge",
-                headers={
-                    "Authorization": f"Bearer {self.access_token}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "masterRecord": {"Id": master_id},
-                    "recordToMergeIds": batch,
-                },
-            )
+            for i in range(0, len(merge_ids), 2):
+                batch = merge_ids[i:i + 2]  # Salesforce allows max 2 per call
+                response = await client.post(
+                    f"{self.instance_url}/services/data/v59.0/sobjects/Contact/merge",
+                    headers={
+                        "Authorization": f"Bearer {self.access_token}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "masterRecord": {"Id": master_id},
+                        "recordToMergeIds": batch,
+                    },
+                )
 
-            if response.status_code not in [200, 201, 204]:
-                return {
-                    "success": False,
-                    "error": f"Salesforce merge failed: {response.status_code} - {response.text}",
-                }
+                if response.status_code not in [200, 201, 204]:
+                    errors.append(
+                        f"Salesforce merge failed for {batch}: "
+                        f"{response.status_code} - {response.text}"
+                    )
+                    # Stop on first failure — do not keep deleting after an error.
+                    break
 
-            await asyncio.sleep(self.RATE_LIMIT_DELAY)
+                absorbed.extend(batch)
+                await asyncio.sleep(self.RATE_LIMIT_DELAY)
 
-        # If more than 2 merge_ids, recursively merge remaining
-        if len(merge_ids) > 2:
-            remaining = merge_ids[2:]
-            return await self.merge_contacts(master_id, remaining)
-
-        return {"success": True}
+        return {
+            "success": len(errors) == 0,
+            "absorbed_ids": absorbed,
+            "errors": errors,
+        }
 
     async def update_contact(
         self,
@@ -156,15 +166,24 @@ class SalesforceMergeService:
         if blended_properties:
             update_result = await self.update_contact(winner_id, blended_properties)
             if not update_result["success"]:
-                errors.append(f"Failed to update winner: {update_result['error']}")
+                # Winner update failed — do NOT merge (losers would be deleted
+                # before their gap-fill values land on the winner).
+                return {
+                    "success": False,
+                    "merged_loser_ids": [],
+                    "merged_count": 0,
+                    "errors": [f"Failed to update winner: {update_result['error']}"],
+                }
 
-        # Step 2: Merge losers
+        # Step 2: Merge losers. absorbed_ids is the ground truth of what Salesforce
+        # actually deleted — report it whether or not the overall op succeeded.
         merge_result = await self.merge_contacts(winner_id, loser_ids)
-        if not merge_result["success"]:
-            errors.append(merge_result["error"])
+        errors.extend(merge_result.get("errors", []))
+        absorbed = merge_result.get("absorbed_ids", [])
 
         return {
             "success": len(errors) == 0,
-            "merged_count": len(loser_ids) if len(errors) == 0 else 0,
+            "merged_loser_ids": absorbed,
+            "merged_count": len(absorbed),
             "errors": errors,
         }
