@@ -21,5 +21,10 @@
   "filter_freemail_domains": ["domain"],
   "parent_role": "parent",
   "activity_role": "activity",
-  "protect_role": "protect"
+  "protect_role": "protect",
+  "verification": {
+    "auto_paths": ["deterministic", "exact_fingerprint"],
+    "require_safe_bucket": true,
+    "require_discriminators_conclusive": false
+  }
 }

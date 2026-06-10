@@ -109,6 +109,7 @@ class MatchProfile:
     id_role: str = "Id"
     activity_role: Optional[str] = None
     protect_role: Optional[str] = None
+    verification: dict = field(default_factory=dict)  # auto_paths / require_safe_bucket / require_discriminators_conclusive
 
     @staticmethod
     def from_json(path: str) -> "MatchProfile":
@@ -144,7 +145,10 @@ class Cluster:
     match_path: str               # 'deterministic' | 'exact_fingerprint' | 'fuzzy' | 'mixed'
     confidence: float             # 0-1
     hierarchy_class: str          # 'disconnected_dupe' | 'sibling_dupe' | 'hierarchy_explained' | 'mixed'
-    bucket: str                   # 'auto_safe' | 'needs_review' | 'known_active'
+    bucket: str                   # activity/protect safety: 'auto_safe' | 'needs_review' | 'known_active'
+    certainty: str = "certain"            # match certainty: 'certain' | 'review'
+    verification_status: str = "needs_verification"   # gate: 'auto_merge' | 'needs_verification'
+    verification_reason: str = ""
     members: list[dict] = field(default_factory=list)   # display snapshots
 
     @property
@@ -246,7 +250,7 @@ class MatchEngine:
 
         cannot_link: set[frozenset] = set()
         det_cluster: dict[str, str] = {}        # record -> deterministic key-cluster tag
-        edge_path: dict[str, str] = {}          # root tag tracking handled at build time
+        edge_type: dict[frozenset, str] = {}    # matched pair -> 'deterministic'|'exact_fingerprint'|'fuzzy'
 
         def try_union(x, y) -> bool:
             rx, ry = find(x), find(y)
@@ -288,6 +292,7 @@ class MatchEngine:
                 for m in ids[1:]:
                     if try_union(ids[0], m):
                         det_pairs += 1
+                        edge_type[frozenset((ids[0], m))] = "deterministic"
 
         # PASS 1+2 — blocking + exact_fingerprint (the audit's primary rule)
         fp_index: dict[str, list[str]] = defaultdict(list)
@@ -306,6 +311,7 @@ class MatchEngine:
                     continue
                 if try_union(ids[0], m):
                     fp_pairs += 1
+                    edge_type[frozenset((ids[0], m))] = "exact_fingerprint"
 
         # PASS 1+2 (fuzzy fallback) — only if profile declares fuzzy rules
         fuzzy_pairs = 0
@@ -333,6 +339,7 @@ class MatchEngine:
                                 continue
                             if try_union(a, b):
                                 fuzzy_pairs += 1
+                                edge_type[frozenset((a, b))] = "fuzzy"
 
         # POST — assemble clusters
         groups: dict[str, list[str]] = defaultdict(list)
@@ -345,11 +352,10 @@ class MatchEngine:
                 continue
             recs = [by_id[i] for i in ids]
             hclass = self._classify_hierarchy(ids, by_id)
-            path = "deterministic" if all(i in det_cluster for i in ids) else "exact_fingerprint"
-            if p.fuzzy_rules:
-                path = "mixed" if path == "deterministic" else path
-            conf = 1.0  # exact-fingerprint / deterministic are exact matches
+            path = self._cluster_path(ids, edge_type)
+            conf = 1.0 if path in ("deterministic", "exact_fingerprint") else 0.9
             bucket = self._bucket(recs)
+            vstatus, certainty, vreason = self._verify(recs, path, bucket)
             clusters.append(Cluster(
                 cluster_id=f"c_{min(ids)}",
                 member_ids=sorted(ids),
@@ -358,6 +364,9 @@ class MatchEngine:
                 confidence=conf,
                 hierarchy_class=hclass,
                 bucket=bucket,
+                certainty=certainty,
+                verification_status=vstatus,
+                verification_reason=vreason,
                 members=[self._snapshot(r) for r in recs],
             ))
 
@@ -372,6 +381,8 @@ class MatchEngine:
             "clusters_hierarchy_explained": len(clusters) - len(dupe_clusters),
             "clusters_auto_safe": sum(1 for c in dupe_clusters if c.bucket == "auto_safe"),
             "clusters_needs_review": sum(1 for c in dupe_clusters if c.bucket == "needs_review"),
+            "clusters_auto_merge": sum(1 for c in dupe_clusters if c.verification_status == "auto_merge"),
+            "clusters_needs_verification": sum(1 for c in dupe_clusters if c.verification_status == "needs_verification"),
             "deterministic_pairs": det_pairs,
             "fingerprint_pairs": fp_pairs,
             "fuzzy_pairs": fuzzy_pairs,
@@ -411,6 +422,55 @@ class MatchEngine:
         if any(len(v) >= 2 for v in same_parent.values()):
             return "sibling_dupe"
         return "disconnected_dupe"
+
+    # -- verification gate --------------------------------------------------- #
+    def _cluster_path(self, ids: list[str], edge_type: dict) -> str:
+        """Weakest match type that joined this cluster (fuzzy > fingerprint > deterministic)."""
+        id_set = set(ids)
+        types = {t for pair, t in edge_type.items() if pair <= id_set}
+        for t in ("fuzzy", "exact_fingerprint", "deterministic"):
+            if t in types:
+                return t
+        return "exact_fingerprint"
+
+    def _verify(self, members: list[dict], path: str, bucket: str):
+        """Decide whether a cluster may auto-merge or must be human-verified first.
+
+        Config (profile.verification):
+          auto_paths        : match paths trusted enough to auto-merge
+                              (default ['deterministic','exact_fingerprint'] — fuzzy always verifies)
+          require_safe_bucket : if true, only the activity-safe bucket can auto-merge (default true)
+          require_discriminators_conclusive : if true, a blank discriminator forces verification
+        """
+        v = self.p.verification or {}
+        auto_paths = v.get("auto_paths", ["deterministic", "exact_fingerprint"])
+        require_safe = v.get("require_safe_bucket", True)
+        require_disc = v.get("require_discriminators_conclusive", False)
+
+        reasons: list[str] = []
+        certain = path in auto_paths
+        if not certain:
+            reasons.append(f"approximate match ({path}) — verify")
+
+        if certain and require_disc:
+            for disc in self.p.discriminators:
+                role = disc["role"]
+                if any(not self.p.value(m, role) for m in members):
+                    certain = False
+                    reasons.append(f"discriminator '{role}' blank on some members — couldn't rule out")
+                    break
+
+        if certain and require_safe and bucket != "auto_safe":
+            reasons.append(f"{bucket.replace('_', ' ')} — verify before merge")
+            status = "needs_verification"
+        elif certain:
+            status = "auto_merge"
+        else:
+            status = "needs_verification"
+
+        if not reasons:
+            reasons.append("deterministic/exact match, activity-safe")
+        return status, ("certain" if certain else "review"), "; ".join(reasons)
 
     # -- bucketing ----------------------------------------------------------- #
     def _bucket(self, recs: list[dict]) -> str:

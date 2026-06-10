@@ -91,6 +91,9 @@ def run_profile(path: str, records: list[dict]):
     print(f"  accounts in dupes     {s['accounts_in_dupe_clusters']:>8,}   (audit {base['true_dupe_accounts']:,})")
     print(f"  hierarchy-excluded    {s['clusters_hierarchy_explained']:>8,}   (audit {base['hierarchy_explained_clusters']:,})")
     print(f"  auto_safe / review    {s['clusters_auto_safe']:>4,} / {s['clusters_needs_review']:<4,}")
+    print(f"  --- verification gate ---")
+    print(f"  auto-merge eligible   {s['clusters_auto_merge']:>8,}   (deterministic/exact + activity-safe)")
+    print(f"  needs verification    {s['clusters_needs_verification']:>8,}   (must be human-approved first)")
 
     # a few example clusters for eyeballing
     dupes = sorted((c for c in result.clusters if c.is_dupe),
@@ -111,6 +114,8 @@ def write_html(out_path: str, source, n_records: int, results) -> None:
             if not c.is_dupe:
                 continue
             clusters.append({
+                "vstatus": c.verification_status,
+                "vreason": c.verification_reason,
                 "bucket": c.bucket,
                 "hierarchy": c.hierarchy_class,
                 "path": c.match_path,
