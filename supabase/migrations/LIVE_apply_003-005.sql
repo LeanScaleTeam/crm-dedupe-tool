@@ -1,7 +1,12 @@
 -- ============================================================================
 -- LIVE INTEGRATION TEST — apply migrations 003, 004, 005 in order.
 -- Paste this whole file into the Supabase SQL Editor (project bpjgstwayjhsmaaxrwru)
--- and Run. Safe onto the current 001-only schema (tables are empty).
+-- and Run. Onto the current 001-only schema. NB: this project is NOT empty — as of
+-- 2026-06-12 it carries existing rows (1 HubSpot connection, 2 contacts scans, 21
+-- duplicate_sets, 2 merges; lineage verified intact). 003 adds columns with defaults;
+-- 004 backfills every existing connection/scan/merge into one tenant via its lineage,
+-- then SET NOT NULL (succeeds because lineage is complete). Reversible via the 004/005
+-- down-migrations.
 --
 -- 002 is intentionally SKIPPED: it only widens the scans.object_type CHECK to allow
 -- 'accounts'/'leads'. This bundle enables the CONTACTS end-to-end path (the only one
