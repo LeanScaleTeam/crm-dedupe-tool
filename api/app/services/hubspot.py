@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.services.encryption import encrypt_token, decrypt_token
 from app.services.supabase_client import get_supabase
 from app.services.tenancy import resolve_tenant_for_save
+from app.services.timeparse import parse_iso
 
 
 class HubSpotTokens(BaseModel):
@@ -155,7 +156,8 @@ class HubSpotService:
             return None
 
         conn = result.data
-        expires_at = datetime.fromisoformat(conn["expires_at"].replace("Z", "+00:00"))
+        # parse_iso tolerates Postgres's trailing-zero-trimmed microseconds.
+        expires_at = parse_iso(conn["expires_at"])
 
         # Check if token needs refresh (5 min buffer)
         if expires_at < datetime.now(timezone.utc) + timedelta(minutes=5):

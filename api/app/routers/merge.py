@@ -260,8 +260,9 @@ async def execute_merge(
     scan = _assert_scan_access(supabase, request.scan_id, user_id)
 
     # The gate: approved, not excluded, not merged. Optionally narrowed to the
-    # caller's set_ids — but never widened past it.
-    query = _approved_set_query(supabase, request.scan_id).select("id")
+    # caller's set_ids — but never widened past it. (_approved_set_query already
+    # applies .select("*"); re-calling .select() on a built query is invalid.)
+    query = _approved_set_query(supabase, request.scan_id)
     if request.set_ids is not None:
         if not request.set_ids:
             raise HTTPException(status_code=400, detail="set_ids was empty.")
@@ -362,7 +363,7 @@ async def resume_merge(
         raise HTTPException(status_code=400, detail="Merge is not paused")
 
     # Get remaining APPROVED sets to merge (same gate as execute).
-    sets_result = _approved_set_query(supabase, merge["scan_id"]).select("id").execute()
+    sets_result = _approved_set_query(supabase, merge["scan_id"]).execute()
 
     set_ids = [s["id"] for s in (sets_result.data or [])]
 

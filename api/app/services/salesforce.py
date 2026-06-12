@@ -8,6 +8,7 @@ from app.config import get_settings
 from app.services.encryption import encrypt_token, decrypt_token
 from app.services.supabase_client import get_supabase
 from app.services.tenancy import resolve_tenant_for_save
+from app.services.timeparse import parse_iso
 
 
 class SalesforceTokens(BaseModel):
@@ -175,8 +176,9 @@ class SalesforceService:
             org_id = portal_data
             instance_url = "https://login.salesforce.com"
 
-        # Check if token might need refresh (1 hour buffer)
-        expires_at = datetime.fromisoformat(conn["expires_at"].replace("Z", "+00:00"))
+        # Check if token might need refresh (1 hour buffer). parse_iso tolerates
+        # Postgres's trailing-zero-trimmed microseconds (Py3.9 fromisoformat won't).
+        expires_at = parse_iso(conn["expires_at"])
         if expires_at < datetime.now(timezone.utc) + timedelta(hours=1):
             # Decrypt and refresh
             refresh_token = decrypt_token(conn["refresh_token_encrypted"])

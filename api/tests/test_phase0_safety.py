@@ -82,13 +82,32 @@ def test_missing_secret_fails_closed(monkeypatch):
 # 2. Partial-merge correctness
 # --------------------------------------------------------------------------- #
 class _FakeResponse:
+    """Mimics a Salesforce SOAP merge() response. The service parses the XML body
+    (not the HTTP status): a 'success' code yields <result><success>true</success>;
+    a failure yields a SOAP <faultstring> the parser surfaces as an error."""
     def __init__(self, status_code):
         self.status_code = status_code
-        self.text = "" if status_code in (200, 201, 204) else "error body"
+        if status_code in (200, 201, 204):
+            body = (
+                '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+                "<soapenv:Body><mergeResponse><result>"
+                "<success>true</success></result></mergeResponse></soapenv:Body>"
+                "</soapenv:Envelope>"
+            )
+        else:
+            body = (
+                '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/">'
+                "<soapenv:Body><soapenv:Fault>"
+                "<faultstring>merge failed</faultstring>"
+                "</soapenv:Fault></soapenv:Body></soapenv:Envelope>"
+            )
+        self.text = body
+        self.content = body.encode("utf-8")
 
 
 class _FakeAsyncClient:
-    """Returns a programmed sequence of status codes, one per .post() call."""
+    """Returns a programmed sequence of status codes, one per .post() call. The
+    batch is recovered from the SOAP envelope's recordToMergeIds elements."""
     sequence: list[int] = []
     calls: list[list[str]] = []
 
@@ -101,8 +120,11 @@ class _FakeAsyncClient:
     async def __aexit__(self, *a):
         return False
 
-    async def post(self, url, headers=None, json=None):
-        _FakeAsyncClient.calls.append(list(json["recordToMergeIds"]))
+    async def post(self, url, headers=None, content=None, json=None):
+        import re
+        body = content.decode("utf-8") if isinstance(content, (bytes, bytearray)) else (content or "")
+        ids = re.findall(r"<urn:recordToMergeIds>([^<]+)</urn:recordToMergeIds>", body)
+        _FakeAsyncClient.calls.append(ids)
         idx = len(_FakeAsyncClient.calls) - 1
         return _FakeResponse(_FakeAsyncClient.sequence[idx])
 

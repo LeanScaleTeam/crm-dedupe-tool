@@ -366,10 +366,16 @@ class SalesforceSandbox:
             return recs[0]
 
     def create_contact(self, first: str, last: str, email: str, phone: str) -> str:
+        # We are deliberately seeding DUPLICATE contacts to test dedupe, so bypass any
+        # active Salesforce Duplicate Rule (the Standard Contact rule is on by default
+        # in many orgs and otherwise rejects the 2nd insert with DUPLICATES_DETECTED).
+        # allowSave=true only works when the rule's action permits save (alert, not
+        # hard-block); a hard-block rule would need to be deactivated in the sandbox.
+        headers = {**self._h(), "Sforce-Duplicate-Rule-Header": "allowSave=true"}
         with httpx.Client(timeout=30) as c:
             r = c.post(
                 f"{self.instance}/services/data/{self.API}/sobjects/Contact",
-                headers=self._h(),
+                headers=headers,
                 json={"FirstName": first, "LastName": last, "Email": email, "Phone": phone},
             )
             if r.status_code not in (200, 201):
@@ -613,15 +619,26 @@ class Harness:
         log("Seeding disposable duplicate Contacts in the sandbox (marked with "
             f"LastName LIKE '{SEED_CONTACT_MARK}%')...")
         stamp = datetime.now(timezone.utc).strftime("%H%M%S")
+        # A and B must land in SEPARATE clusters. DuplicateDetector blocks on
+        # email-domain + name-prefix(first 3) and scores email(0.6)+name(0.4); two
+        # groups differing by a single char in otherwise-identical long strings
+        # cross-match at ~0.98 and collapse into ONE cluster. So give A and B DISTINCT
+        # first names, last-name cores, AND email domains — they then share no block
+        # and score well under the 0.9 threshold. Within a group the two records are
+        # IDENTICAL, so each is its own confidence-1.0 duplicate set.
+        seeds = {
+            "A": {"first": "Alice", "core": "Alpha", "dom": f"alpha-{stamp}.invalid"},
+            "B": {"first": "Bravo", "core": "Bravo", "dom": f"bravo-{stamp}.invalid"},
+        }
         groups: dict[str, list[str]] = {}
         for grp in ("A", "B"):
-            last = f"{SEED_CONTACT_MARK}{grp}{stamp}"
-            email = f"dupe.{grp.lower()}.{stamp}@dedupe-harness.invalid"
-            phone = f"+1555{stamp}"
-            # Identical email/name/phone -> the dedup engine clusters them at
-            # confidence 1.0 (verified against DuplicateDetector on a 2-record input).
-            w = self.sf.create_contact("Dupe", last, email, phone)
-            l = self.sf.create_contact("Dupe", last, email, phone)
+            s = seeds[grp]
+            first = s["first"]
+            last = f"{SEED_CONTACT_MARK}{s['core']}{stamp}"   # keeps the ZZZE2E teardown marker
+            email = f"{first.lower()}.{stamp}@{s['dom']}"
+            phone = f"+1{'111' if grp == 'A' else '222'}{stamp}"
+            w = self.sf.create_contact(first, last, email, phone)
+            l = self.sf.create_contact(first, last, email, phone)
             groups[grp] = [w, l]
             self.created["sf_contacts"].extend([w, l])
             log(f"  group {grp}: winner={w} loser={l} (email={email})")

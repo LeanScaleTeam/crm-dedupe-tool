@@ -1,8 +1,11 @@
 """Salesforce merge operations service."""
 from __future__ import annotations
-import httpx
 import asyncio
+import xml.etree.ElementTree as ET
 from typing import Optional
+from xml.sax.saxutils import escape
+
+import httpx
 
 from app.services.salesforce import SalesforceConnection
 
@@ -18,6 +21,7 @@ class SalesforceMergeService:
     """
 
     RATE_LIMIT_DELAY = 0.05  # Salesforce allows more requests
+    SOAP_API_VERSION = "59.0"  # matches the REST v59.0 used elsewhere
 
     def __init__(self, connection: SalesforceConnection):
         self.connection = connection
@@ -30,19 +34,23 @@ class SalesforceMergeService:
         merge_ids: list[str],
     ) -> dict:
         """
-        Merge contacts using Salesforce's Merge API.
+        Merge contacts using Salesforce's SOAP merge() call.
 
-        The master record is kept, and merge records are deleted. Related records
+        Salesforce has NO REST endpoint for record merge — POSTing to
+        /sobjects/Contact/merge is parsed as an upsert-by-external-id and 404s
+        ("Provided external ID field does not exist or is not accessible: merge").
+        Record merge is the SOAP API merge() operation (Partner WSDL). The OAuth
+        access token doubles as the SOAP sessionId.
+
+        The master record is kept, and merge records are deleted; related records
         are re-parented to the master. Salesforce merges at most 2 records per
         call, so N losers take ceil(N/2) sequential calls.
 
         IMPORTANT (partial-merge correctness): each successful call IRREVERSIBLY
         deletes its loser records. If a later batch fails, the earlier batches'
-        deletions have already happened. We therefore report exactly which loser
-        ids were absorbed so the caller can (a) record real progress and
-        (b) never re-attempt an already-deleted id on resume. The previous
-        implementation recursed and returned only the LAST batch's result, so a
-        partial success was silently reported as a total failure.
+        deletions have already happened. We report exactly which loser ids were
+        absorbed and stop on the first failure, so a partial success is never
+        reported as a total failure and an already-deleted id is never re-attempted.
 
         Args:
             master_id: Salesforce ID of the contact to keep (master)
@@ -54,25 +62,21 @@ class SalesforceMergeService:
         absorbed: list[str] = []
         errors: list[str] = []
 
+        endpoint = f"{self.instance_url}/services/Soap/u/{self.SOAP_API_VERSION}"
+        headers = {"Content-Type": "text/xml; charset=UTF-8", "SOAPAction": "merge"}
+
         async with httpx.AsyncClient() as client:
             for i in range(0, len(merge_ids), 2):
                 batch = merge_ids[i:i + 2]  # Salesforce allows max 2 per call
+                envelope = self._merge_envelope(master_id, batch)
                 response = await client.post(
-                    f"{self.instance_url}/services/data/v59.0/sobjects/Contact/merge",
-                    headers={
-                        "Authorization": f"Bearer {self.access_token}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "masterRecord": {"Id": master_id},
-                        "recordToMergeIds": batch,
-                    },
+                    endpoint, headers=headers, content=envelope.encode("utf-8")
                 )
-
-                if response.status_code not in [200, 201, 204]:
+                ok, detail = self._parse_merge_response(response)
+                if not ok:
                     errors.append(
                         f"Salesforce merge failed for {batch}: "
-                        f"{response.status_code} - {response.text}"
+                        f"{response.status_code} - {detail}"
                     )
                     # Stop on first failure — do not keep deleting after an error.
                     break
@@ -85,6 +89,68 @@ class SalesforceMergeService:
             "absorbed_ids": absorbed,
             "errors": errors,
         }
+
+    def _merge_envelope(self, master_id: str, loser_ids: list[str]) -> str:
+        """Build a SOAP Partner-API merge() envelope. The blended winner fields are
+        already applied via update_contact (REST PATCH), so masterRecord carries
+        only type + Id here."""
+        losers = "".join(
+            f"<urn:recordToMergeIds>{escape(lid)}</urn:recordToMergeIds>"
+            for lid in loser_ids
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<soapenv:Envelope xmlns:soapenv="http://schemas.xmlsoap.org/soap/envelope/"'
+            ' xmlns:urn="urn:partner.soap.sforce.com"'
+            ' xmlns:urn1="urn:sobject.partner.soap.sforce.com">'
+            "<soapenv:Header>"
+            "<urn:SessionHeader>"
+            f"<urn:sessionId>{escape(self.access_token)}</urn:sessionId>"
+            "</urn:SessionHeader>"
+            "</soapenv:Header>"
+            "<soapenv:Body>"
+            "<urn:merge><urn:request>"
+            "<urn:masterRecord>"
+            "<urn1:type>Contact</urn1:type>"
+            f"<urn1:Id>{escape(master_id)}</urn1:Id>"
+            "</urn:masterRecord>"
+            f"{losers}"
+            "</urn:request></urn:merge>"
+            "</soapenv:Body></soapenv:Envelope>"
+        )
+
+    @staticmethod
+    def _parse_merge_response(response: httpx.Response) -> tuple[bool, str]:
+        """Parse a SOAP merge() response -> (success, detail). On a 200 the body
+        carries <result><success>true|false</success>...; a SOAP fault (HTTP 500)
+        carries <faultstring>. Returns the error text on failure."""
+        try:
+            root = ET.fromstring(response.content)
+        except Exception:
+            return False, (response.text or "")[:300]
+
+        def local(tag: str) -> str:
+            return tag.rsplit("}", 1)[-1]
+
+        fault: Optional[str] = None
+        success: Optional[bool] = None
+        messages: list[str] = []
+        for el in root.iter():
+            ln = local(el.tag)
+            if ln == "faultstring" and el.text:
+                fault = el.text.strip()
+            elif ln == "success" and el.text is not None:
+                success = el.text.strip().lower() == "true"
+            elif ln in ("message", "statusCode") and el.text:
+                messages.append(el.text.strip())
+
+        if success is True:
+            return True, ""
+        if fault:
+            return False, fault
+        if messages:
+            return False, "; ".join(messages)
+        return False, (response.text or "")[:300]
 
     async def update_contact(
         self,
@@ -101,21 +167,25 @@ class SalesforceMergeService:
         Returns:
             Dict with update result
         """
-        # Map common field names to Salesforce API names
+        # Map the blended FieldBlender keys (snake_case: first_name/last_name/
+        # job_title/email/phone) to Salesforce API field names. Only WRITABLE
+        # identity fields are mapped; anything NOT in this map is skipped, so we
+        # never send Salesforce an unknown column (INVALID_FIELD). That deliberately
+        # drops: company (-> AccountId needs a real Id, not a name) and the metadata
+        # fields the blender includes (created_at / updated_at / association_count).
         field_mapping = {
-            "phone": "Phone",
             "email": "Email",
-            "firstname": "FirstName",
-            "lastname": "LastName",
-            "company": "AccountId",  # Note: This needs special handling
-            "jobtitle": "Title",
+            "first_name": "FirstName",
+            "last_name": "LastName",
+            "phone": "Phone",
+            "job_title": "Title",
         }
 
-        # Transform properties to Salesforce field names
+        # Transform properties to Salesforce field names, dropping unmapped keys.
         sf_properties = {}
         for key, value in properties.items():
-            sf_key = field_mapping.get(key.lower(), key)
-            if sf_key != "AccountId" and value:  # Skip company for now
+            sf_key = field_mapping.get(key.lower())
+            if sf_key and value:
                 sf_properties[sf_key] = value
 
         if not sf_properties:
