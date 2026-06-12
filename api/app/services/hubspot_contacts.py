@@ -53,7 +53,10 @@ class HubSpotContactsService:
                 )
 
                 if response.status_code != 200:
-                    raise Exception(f"Failed to fetch contacts: {response.text}")
+                    # Log the raw provider body server-side; the generic message is
+                    # what reaches scans.error_message (shown to tenant members).
+                    print(f"[hubspot] fetch contacts failed ({response.status_code}): {response.text}")
+                    raise Exception("Failed to fetch HubSpot contacts.")
 
                 data = response.json()
                 results = data.get("results", [])

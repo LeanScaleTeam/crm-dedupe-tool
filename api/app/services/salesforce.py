@@ -7,6 +7,7 @@ from pydantic import BaseModel
 from app.config import get_settings
 from app.services.encryption import encrypt_token, decrypt_token
 from app.services.supabase_client import get_supabase
+from app.services.tenancy import resolve_tenant_for_save
 
 
 class SalesforceTokens(BaseModel):
@@ -56,7 +57,11 @@ class SalesforceService:
             )
 
             if response.status_code != 200:
-                raise Exception(f"Token exchange failed: {response.text}")
+                # Never surface the raw provider body to the caller (it can carry
+                # OAuth diagnostics and is attacker-influenced). Log it server-side;
+                # raise a generic message that is safe to return / persist.
+                print(f"[salesforce] token exchange failed ({response.status_code}): {response.text}")
+                raise Exception("Salesforce token exchange failed.")
 
             data = response.json()
             return SalesforceTokens(
@@ -81,7 +86,9 @@ class SalesforceService:
             )
 
             if response.status_code != 200:
-                raise Exception(f"Token refresh failed: {response.text}")
+                # See note in exchange_code_for_tokens: log server-side, raise generic.
+                print(f"[salesforce] token refresh failed ({response.status_code}): {response.text}")
+                raise Exception("Salesforce token refresh failed.")
 
             data = response.json()
             return SalesforceTokens(
@@ -104,7 +111,9 @@ class SalesforceService:
             )
 
             if response.status_code != 200:
-                raise Exception(f"Failed to get org info: {response.text}")
+                # Log the raw provider body server-side; don't return it to the caller.
+                print(f"[salesforce] get_org_id failed ({response.status_code}): {response.text}")
+                raise Exception("Failed to get Salesforce org info.")
 
             data = response.json()
             records = data.get("records", [])
@@ -126,10 +135,16 @@ class SalesforceService:
         encrypted_access = encrypt_token(tokens.access_token)
         encrypted_refresh = encrypt_token(tokens.refresh_token)
 
+        # Resolve the tenant BEFORE the upsert (crm_connections.tenant_id is NOT
+        # NULL). tenant = connected org: reuse this user's existing salesforce tenant
+        # or create a fresh one (client access off) with the user as owner.
+        tenant_id = resolve_tenant_for_save(self.supabase, user_id, "salesforce", org_id)
+
         # Store instance URL in portal_id field for retrieval
         result = self.supabase.table("crm_connections").upsert(
             {
                 "user_id": user_id,
+                "tenant_id": tenant_id,
                 "crm_type": "salesforce",
                 "access_token_encrypted": encrypted_access,
                 "refresh_token_encrypted": encrypted_refresh,

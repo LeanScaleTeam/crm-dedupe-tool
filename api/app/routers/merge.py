@@ -9,6 +9,8 @@ from app.auth import require_user
 from app.services.supabase_client import get_supabase
 from app.services.crm_factory import get_crm_services
 from app.services.reports import ReportService
+from app.services.tenancy import assert_tenant_access
+from app.services.merge_backup import build_backup_row, write_backup
 
 router = APIRouter()
 
@@ -21,18 +23,18 @@ class MergeRequest(BaseModel):
     set_ids: Optional[List[str]] = None
 
 
-def _assert_scan_owner(supabase, scan_id: str, user_id: str) -> dict:
-    """Verify the scan exists AND belongs to user_id. Returns the scan row.
+def _assert_scan_access(supabase, scan_id: str, user_id: str) -> dict:
+    """Verify the scan exists AND the caller can access its tenant. Returns the row.
 
-    The backend uses the service-role key (RLS bypassed), so ownership must be
+    The backend uses the service-role key (RLS bypassed), so tenant access must be
     checked explicitly here — a verified token alone does not scope data access.
     """
-    res = supabase.table("scans").select("*").eq("id", scan_id).eq(
-        "user_id", user_id
-    ).single().execute()
-    if not res.data:
+    res = supabase.table("scans").select("*").eq("id", scan_id).limit(1).execute()
+    scan = (res.data or [None])[0]
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    return res.data
+    assert_tenant_access(supabase, scan.get("tenant_id"), user_id)
+    return scan
 
 
 # A duplicate set may be merged only if it is approved and not already
@@ -57,8 +59,8 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
             "started_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", merge_id).execute()
 
-        # Get scan to find connection_id
-        scan_result = supabase.table("scans").select("connection_id").eq(
+        # Get scan to find connection + tenant (tenant_id stamps the pre-merge backup).
+        scan_result = supabase.table("scans").select("connection_id,tenant_id").eq(
             "id", scan_id
         ).single().execute()
 
@@ -66,14 +68,25 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
             raise Exception("Scan not found")
 
         connection_id = scan_result.data["connection_id"]
+        tenant_id = scan_result.data.get("tenant_id")
+
+        # crm_type is recorded on each backup row for the restore path.
+        conn_row = supabase.table("crm_connections").select("crm_type").eq(
+            "id", connection_id
+        ).single().execute()
+        crm_type = (conn_row.data or {}).get("crm_type")
 
         # Get CRM services based on connection type
         _, _, merge_service = await get_crm_services(user_id, connection_id)
 
         # Get duplicate sets to merge — re-assert the approval gate here (defence
         # in depth: never merge a set that isn't approved, even if its id was
-        # queued earlier and approval was since revoked).
-        sets_result = supabase.table("duplicate_sets").select("*").in_(
+        # queued earlier and approval was since revoked). Self-scope to this scan so
+        # the safety re-check enforces scan/tenant scope independently of how set_ids
+        # was derived (a future caller could pass ids it didn't pre-filter).
+        sets_result = supabase.table("duplicate_sets").select("*").eq(
+            "scan_id", scan_id
+        ).in_(
             "id", set_ids
         ).eq("decision", "approved").eq("excluded", False).eq("merged", False).execute()
 
@@ -100,6 +113,10 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
                 "already_merged": list(already),
                 "all_loser_ids": list(dup_set["loser_record_ids"]),  # full original set
                 "blended_properties": dup_set.get("merged_preview", {}),
+                # Pre-merge snapshots (captured at scan time; not mutated by merge) —
+                # backed up before the irreversible merge below.
+                "winner_data": dup_set.get("winner_data"),
+                "loser_data": dup_set.get("loser_data"),
             })
 
         # Execute merges
@@ -124,6 +141,29 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
                     "merged": True, "decision": "merged",
                     "merged_loser_ids": sorted(op["already_merged"]),
                 }).eq("id", op["set_id"]).execute()
+                continue
+
+            # PRE-MERGE BACKUP (precondition): snapshot this set before the
+            # irreversible CRM merge. If the backup can't be written, do NOT merge —
+            # we never destroy records we couldn't back up first.
+            try:
+                write_backup(
+                    supabase,
+                    build_backup_row(
+                        merge_id, scan_id, tenant_id, crm_type, connection_id, op
+                    ),
+                )
+            except Exception as backup_err:
+                failed += 1
+                error_log.append({
+                    "set_id": op["set_id"],
+                    "error": f"Pre-merge backup failed; set not merged: {backup_err}",
+                })
+                supabase.table("merges").update({
+                    "completed_sets": completed,
+                    "failed_sets": failed,
+                    "error_log": error_log,
+                }).eq("id", merge_id).execute()
                 continue
 
             # Execute merge
@@ -217,7 +257,7 @@ async def execute_merge(
         "all non-excluded".
     """
     supabase = get_supabase()
-    _assert_scan_owner(supabase, request.scan_id, user_id)
+    scan = _assert_scan_access(supabase, request.scan_id, user_id)
 
     # The gate: approved, not excluded, not merged. Optionally narrowed to the
     # caller's set_ids — but never widened past it.
@@ -241,6 +281,7 @@ async def execute_merge(
     merge_data = {
         "id": merge_id,
         "scan_id": request.scan_id,
+        "tenant_id": scan["tenant_id"],
         "user_id": user_id,
         "status": "pending",
         "total_sets": len(set_ids),
@@ -262,13 +303,13 @@ async def execute_merge(
     return {"merge_id": merge_id, "status": "pending", "total_sets": len(set_ids)}
 
 
-def _assert_merge_owner(supabase, merge_id: str, user_id: str) -> dict:
-    res = supabase.table("merges").select("*").eq("id", merge_id).eq(
-        "user_id", user_id
-    ).single().execute()
-    if not res.data:
+def _assert_merge_access(supabase, merge_id: str, user_id: str) -> dict:
+    res = supabase.table("merges").select("*").eq("id", merge_id).limit(1).execute()
+    merge = (res.data or [None])[0]
+    if not merge:
         raise HTTPException(status_code=404, detail="Merge not found")
-    return res.data
+    assert_tenant_access(supabase, merge.get("tenant_id"), user_id)
+    return merge
 
 
 @router.get("/{merge_id}/status")
@@ -276,7 +317,7 @@ async def get_merge_status(merge_id: str, user_id: str = Depends(require_user)):
     """Get current merge progress and status."""
     supabase = get_supabase()
 
-    merge = _assert_merge_owner(supabase, merge_id, user_id)
+    merge = _assert_merge_access(supabase, merge_id, user_id)
     return {
         "id": merge["id"],
         "status": merge["status"],
@@ -294,7 +335,7 @@ async def pause_merge(merge_id: str, user_id: str = Depends(require_user)):
     """Pause an in-progress merge."""
     supabase = get_supabase()
 
-    merge = _assert_merge_owner(supabase, merge_id, user_id)
+    merge = _assert_merge_access(supabase, merge_id, user_id)
     if merge["status"] != "running":
         raise HTTPException(status_code=400, detail="Merge is not running")
 
@@ -315,7 +356,7 @@ async def resume_merge(
     """Resume a paused merge."""
     supabase = get_supabase()
 
-    merge = _assert_merge_owner(supabase, merge_id, user_id)
+    merge = _assert_merge_access(supabase, merge_id, user_id)
 
     if merge["status"] != "paused":
         raise HTTPException(status_code=400, detail="Merge is not paused")

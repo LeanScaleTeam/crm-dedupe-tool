@@ -10,6 +10,7 @@ from pathlib import Path
 from app.auth import require_user
 from app.services.supabase_client import get_supabase
 from app.services.crm_factory import get_crm_services
+from app.services.tenancy import assert_tenant_access
 from app.services.dedup_engine import DuplicateDetector, WinnerSelector, FieldBlender
 from app.services.match_engine import MatchEngine, MatchProfile
 
@@ -37,15 +38,16 @@ class ScanRequest(BaseModel):
     config: ScanConfig
 
 
-def _assert_scan_owner(supabase, scan_id: str, user_id: str) -> dict:
-    """Verify the scan exists AND belongs to user_id (RLS is bypassed by the
-    service-role client, so ownership is checked explicitly)."""
-    res = supabase.table("scans").select("*").eq("id", scan_id).eq(
-        "user_id", user_id
-    ).single().execute()
-    if not res.data:
+def _assert_scan_access(supabase, scan_id: str, user_id: str) -> dict:
+    """Verify the scan exists AND the caller can access its tenant. RLS is bypassed
+    by the service-role client, so tenant access is checked explicitly here (an
+    owner/member of the scan's tenant, or a platform-staff operator)."""
+    res = supabase.table("scans").select("*").eq("id", scan_id).limit(1).execute()
+    scan = (res.data or [None])[0]
+    if not scan:
         raise HTTPException(status_code=404, detail="Scan not found")
-    return res.data
+    assert_tenant_access(supabase, scan.get("tenant_id"), user_id)
+    return scan
 
 
 def _account_display(m: dict) -> dict:
@@ -239,19 +241,21 @@ async def start_scan(
     """Start a new duplicate detection scan."""
     supabase = get_supabase()
 
-    # Validate connection exists AND belongs to the authenticated user.
+    # Validate the connection exists AND the caller can access its tenant.
     conn_result = supabase.table("crm_connections").select("*").eq(
         "id", request.connection_id
-    ).eq("user_id", user_id).single().execute()
-
-    if not conn_result.data:
+    ).limit(1).execute()
+    connection = (conn_result.data or [None])[0]
+    if not connection:
         raise HTTPException(status_code=404, detail="Connection not found")
+    assert_tenant_access(supabase, connection.get("tenant_id"), user_id)
 
-    # Create scan record
+    # Create scan record (stamped with the connection's tenant; user_id is the actor).
     scan_id = str(uuid.uuid4())
     scan_data = {
         "id": scan_id,
         "user_id": user_id,
+        "tenant_id": connection["tenant_id"],
         "connection_id": request.connection_id,
         "object_type": request.config.object_type,
         "status": "pending",
@@ -283,7 +287,7 @@ async def get_scan_status(scan_id: str, user_id: str = Depends(require_user)):
     """Get current scan progress and status."""
     supabase = get_supabase()
 
-    scan = _assert_scan_owner(supabase, scan_id, user_id)
+    scan = _assert_scan_access(supabase, scan_id, user_id)
     return {
         "id": scan["id"],
         "status": scan["status"],
@@ -307,7 +311,7 @@ async def get_scan_results(
     supabase = get_supabase()
 
     # Verify the scan exists and belongs to the authenticated user.
-    scan = _assert_scan_owner(supabase, scan_id, user_id)
+    scan = _assert_scan_access(supabase, scan_id, user_id)
 
     # Get duplicate sets with pagination
     offset = (page - 1) * per_page
@@ -354,7 +358,7 @@ async def update_duplicate_set(
     """Update a duplicate set: exclude it, edit the blended preview, or record a
     review decision (approve / exclude / escalate). Approval is what gates merge."""
     supabase = get_supabase()
-    _assert_scan_owner(supabase, scan_id, user_id)
+    _assert_scan_access(supabase, scan_id, user_id)
 
     update_data: dict = {}
     if request.excluded is not None:

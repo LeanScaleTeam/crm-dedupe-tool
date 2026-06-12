@@ -12,8 +12,8 @@ Supabase issues HS256 access tokens signed with the project's JWT secret
 
 NOTE: the DB client still uses the service-role key (RLS bypassed), so verifying
 the token is necessary but NOT sufficient — protected endpoints must ALSO check
-row ownership (scan/connection belongs to this user) explicitly. See merge.py /
-scan.py `_assert_scan_owner`.
+tenant access (scan/connection belongs to a tenant the caller can access)
+explicitly. See merge.py / scan.py `_assert_scan_access`.
 """
 from __future__ import annotations
 

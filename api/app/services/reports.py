@@ -4,6 +4,7 @@ from typing import Optional
 import io
 
 from app.services.supabase_client import get_supabase
+from app.services.tenancy import can_access_tenant
 
 # WeasyPrint requires GTK system libraries (gobject, pango).
 # Import lazily so the app starts without them; PDF generation
@@ -45,16 +46,18 @@ class ReportService:
         Returns:
             Dict with report data
         """
-        # Get merge details — scoped to the owner (defense in depth; the router
-        # also checks ownership).
+        # Get merge details — scoped to the caller's tenant access (defense in
+        # depth; the router also checks access). The service-role client bypasses
+        # RLS, so the tenant check is explicit.
         merge_result = self.supabase.table("merges").select("*").eq(
             "id", merge_id
-        ).eq("user_id", user_id).single().execute()
+        ).limit(1).execute()
+        merge = (merge_result.data or [None])[0]
 
-        if not merge_result.data:
+        if not merge or not can_access_tenant(
+            self.supabase, merge.get("tenant_id"), user_id
+        ):
             raise Exception("Merge not found")
-
-        merge = merge_result.data
 
         # Get scan details
         scan_result = self.supabase.table("scans").select("*").eq(
@@ -100,8 +103,10 @@ class ReportService:
             },
         }
 
-        # Save report
-        report_id = await self._save_report(merge_id, user_id, report_data)
+        # Save report (stamped with the merge's tenant; user_id is the actor).
+        report_id = await self._save_report(
+            merge_id, user_id, merge["tenant_id"], report_data
+        )
         report_data["id"] = report_id
 
         return report_data
@@ -110,6 +115,7 @@ class ReportService:
         self,
         merge_id: str,
         user_id: str,
+        tenant_id: str,
         report_data: dict,
     ) -> str:
         """Save report to database."""
@@ -119,6 +125,7 @@ class ReportService:
         self.supabase.table("reports").insert({
             "id": report_id,
             "merge_id": merge_id,
+            "tenant_id": tenant_id,
             "user_id": user_id,
             "report_data": report_data,
         }).execute()
@@ -136,16 +143,19 @@ class ReportService:
         Returns:
             PDF bytes
         """
-        # Get report — scoped to the owner so the ID alone can't leak another
-        # user's report even if a future caller skips the router check.
+        # Get report — scoped to tenant access so the ID alone can't leak another
+        # tenant's report even if a future caller skips the router check.
         result = self.supabase.table("reports").select("*").eq(
             "id", report_id
-        ).eq("user_id", user_id).single().execute()
+        ).limit(1).execute()
+        row = (result.data or [None])[0]
 
-        if not result.data:
+        if not row or not can_access_tenant(
+            self.supabase, row.get("tenant_id"), user_id
+        ):
             raise Exception("Report not found")
 
-        report = result.data["report_data"]
+        report = row["report_data"]
 
         # Generate HTML
         html_content = self._generate_html(report)
