@@ -18,9 +18,12 @@
 -- IDEMPOTENT / RE-RUNNABLE: every statement is guarded (IF [NOT] EXISTS, DROP POLICY
 -- IF EXISTS, CREATE OR REPLACE), and the 004 backfill only touches still-untenanted
 -- connections (WHERE tenant_id IS NULL), so re-pasting the whole file after a partial
--- or full run is safe and will not error or create duplicate tenants. The 004 and 005
--- blocks are each wrapped in their own transaction, so a mid-block failure rolls that
--- block back cleanly.
+-- or full run is safe and will not error or create duplicate tenants. There is NO
+-- inline BEGIN/COMMIT and NO temp table: the Supabase SQL editor executes statements
+-- in autocommit (it ignores inline transaction control, and a CREATE TEMP TABLE ...
+-- ON COMMIT DROP would be dropped before the next statement) — so the script relies on
+-- per-statement idempotency, not transaction atomicity. If a statement fails, fix it
+-- and re-paste the whole file; completed statements stay and the rest converge.
 -- ============================================================================
 
 
@@ -100,8 +103,12 @@ UPDATE duplicate_sets SET decision = 'merged'   WHERE merged   = TRUE AND decisi
 -- NOT NULL, the OLD backend (which inserts connections/scans without tenant_id) would
 -- fail INSERTs on new rows — a fail-safe error, not data corruption, but apply +
 -- deploy as one step. Part of the consolidated LIVE_apply bundle (depends on 001+003).
-
-BEGIN;
+--
+-- NB: NO explicit BEGIN/COMMIT. The Supabase SQL editor runs statements in autocommit
+-- (it ignores inline transaction control), so every statement below is individually
+-- idempotent and NO temp table is used (a CREATE TEMP TABLE ... ON COMMIT DROP would
+-- be dropped before the next statement could read it). A failed run can just be
+-- re-pasted; it converges.
 
 -- 1. Tenancy tables ----------------------------------------------------------
 
@@ -152,40 +159,45 @@ CREATE INDEX IF NOT EXISTS idx_merges_tenant  ON merges(tenant_id);
 CREATE INDEX IF NOT EXISTS idx_reports_tenant ON reports(tenant_id);
 
 -- 3. Backfill (tenant = connected org) ---------------------------------------
--- Pre-generate one (connection -> tenant) mapping so we can insert the tenants and
--- then point everything back at them deterministically. Only still-untenanted
--- connections are processed, so a re-run is a no-op (no duplicate tenants).
+-- TEMP-TABLE-FREE: the editor's autocommit drops a CREATE TEMP TABLE ... ON COMMIT
+-- DROP before the next statement can use it. Instead derive a STABLE tenant id from
+-- each connection id via uuid_generate_v5 (a hash of the conn id, not random), so the
+-- three statements below independently compute the SAME id with no shared state.
+-- Order: create the tenant + owner membership for each still-untenanted connection
+-- FIRST (while tenant_id IS NULL still identifies it), then point the connection at
+-- its tenant LAST. Every statement is guarded, so a re-run is a no-op — an already-
+-- tenanted connection (e.g. from an earlier partial run) is skipped and keeps the
+-- tenant id it already has.
 
-CREATE TEMP TABLE _conn_tenant ON COMMIT DROP AS
+-- One tenant per still-untenanted connection. client_access_enabled = FALSE (secure
+-- by default): the only members created here are OWNERS (below), who are never gated
+-- by the flag, so FALSE grants nothing away. It only governs future invited CLIENTs.
+INSERT INTO tenants (id, name, client_access_enabled)
 SELECT
-    c.id AS conn_id,
-    uuid_generate_v4() AS tenant_id,
+    uuid_generate_v5(uuid_ns_url(), 'dedupe-tenant:' || c.id::text),
     -- Human label: Salesforce portal_id is "orgId|instanceUrl" -> take orgId;
     -- HubSpot portal_id is the hub id. Fall back to the crm_type if blank.
     COALESCE(NULLIF(split_part(c.portal_id, '|', 1), ''), c.crm_type)
-        || ' (' || c.crm_type || ')' AS name,
-    c.user_id AS owner_id
+        || ' (' || c.crm_type || ')',
+    FALSE
 FROM crm_connections c
-WHERE c.tenant_id IS NULL;
+WHERE c.tenant_id IS NULL
+ON CONFLICT (id) DO NOTHING;
 
--- One tenant per existing connection. client_access_enabled = FALSE (secure by
--- default, same as new tenants): the only members created at backfill time are
--- OWNERS (below), and owners are never gated by this flag, so FALSE grants nothing
--- away on day one. It only governs future invited CLIENT members — leave each
--- legacy tenant closed until an operator deliberately invites a client and flips it.
-INSERT INTO tenants (id, name, client_access_enabled)
-SELECT tenant_id, name, FALSE FROM _conn_tenant;
-
--- Point each connection at its tenant.
-UPDATE crm_connections c
-SET tenant_id = ct.tenant_id
-FROM _conn_tenant ct
-WHERE ct.conn_id = c.id;
-
--- The connecting user becomes the tenant OWNER (always-on access).
+-- The connecting user becomes that tenant's OWNER (always-on access). Same derived id.
 INSERT INTO tenant_members (tenant_id, user_id, role, is_active)
-SELECT tenant_id, owner_id, 'owner', TRUE FROM _conn_tenant
+SELECT
+    uuid_generate_v5(uuid_ns_url(), 'dedupe-tenant:' || c.id::text),
+    c.user_id, 'owner', TRUE
+FROM crm_connections c
+WHERE c.tenant_id IS NULL
 ON CONFLICT (tenant_id, user_id) DO NOTHING;
+
+-- Point each still-untenanted connection at its tenant (LAST, so the guards above
+-- still saw it as untenanted).
+UPDATE crm_connections c
+SET tenant_id = uuid_generate_v5(uuid_ns_url(), 'dedupe-tenant:' || c.id::text)
+WHERE c.tenant_id IS NULL;
 
 -- scans / merges / reports inherit tenant_id from their lineage. Every row has an
 -- intact lineage (scans.connection_id, merges.scan_id, reports.merge_id are all
@@ -332,8 +344,6 @@ CREATE POLICY "reports visible within tenant"
     ON reports FOR SELECT
     USING (can_access_tenant(tenant_id, auth.uid()));
 
-COMMIT;
-
 
 -- >>>>>>>>>>>>>>>>>>>>>>>>  005_merge_backups.sql  <<<<<<<<<<<<<<<<<<<<<<<<
 
@@ -353,8 +363,6 @@ COMMIT;
 -- Tenant-stamped and consistent with 004: SELECT is visible within the tenant; all
 -- writes are service-role only (no JWT write policy). Part of the consolidated
 -- LIVE_apply bundle (depends on 001+003+004).
-
-BEGIN;
 
 CREATE TABLE IF NOT EXISTS merge_backups (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
@@ -396,5 +404,3 @@ DROP POLICY IF EXISTS "merge backups visible within tenant" ON merge_backups;
 CREATE POLICY "merge backups visible within tenant"
     ON merge_backups FOR SELECT
     USING (can_access_tenant(tenant_id, auth.uid()));
-
-COMMIT;
