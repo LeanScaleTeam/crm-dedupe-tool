@@ -3,6 +3,7 @@
 import { useState, useEffect } from 'react'
 import { useRouter } from 'next/navigation'
 import { apiFetch } from '@/lib/api'
+import AppNav from '@/components/AppNav'
 
 interface Report {
   id: string
@@ -57,23 +58,44 @@ export default function ReportsClient({}: ReportsClientProps) {
     }
   }
 
-  const downloadPdf = async (reportId: string) => {
+  const openReport = async (reportId: string) => {
+    // Open a blank tab synchronously (avoids popup blockers), then fill it with the
+    // report HTML fetched with the auth token. Cmd/Ctrl+P from there → PDF.
+    const win = window.open('', '_blank')
     try {
-      const response = await apiFetch(`/reports/${reportId}/pdf`)
+      const response = await apiFetch(`/reports/${reportId}/html`)
+      if (response.ok) {
+        const html = await response.text()
+        if (win) {
+          win.document.open()
+          win.document.write(html)
+          win.document.close()
+        }
+      } else if (win) {
+        win.close()
+      }
+    } catch (error) {
+      console.error('Failed to open report:', error)
+      if (win) win.close()
+    }
+  }
 
+  const downloadXlsx = async (reportId: string) => {
+    try {
+      const response = await apiFetch(`/reports/${reportId}/xlsx`)
       if (response.ok) {
         const blob = await response.blob()
         const url = window.URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
-        a.download = `dedup-report-${reportId.slice(0, 8)}.pdf`
+        a.download = `dedup-report-${reportId.slice(0, 8)}.xlsx`
         document.body.appendChild(a)
         a.click()
         a.remove()
         window.URL.revokeObjectURL(url)
       }
     } catch (error) {
-      console.error('Failed to download PDF:', error)
+      console.error('Failed to download Excel:', error)
     }
   }
 
@@ -93,6 +115,7 @@ export default function ReportsClient({}: ReportsClientProps) {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <AppNav />
       <div className="max-w-4xl mx-auto py-12 px-4">
         {/* Header */}
         <div className="mb-8">
@@ -148,15 +171,26 @@ export default function ReportsClient({}: ReportsClientProps) {
                     </p>
                   </div>
 
-                  <button
-                    onClick={() => downloadPdf(report.id)}
-                    className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
-                  >
-                    <svg className="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                    </svg>
-                    Download PDF
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => openReport(report.id)}
+                      className="flex items-center gap-2 px-4 py-2 border border-gray-300 rounded-lg hover:bg-gray-50"
+                    >
+                      <svg className="w-5 h-5 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                      </svg>
+                      View report
+                    </button>
+                    <button
+                      onClick={() => downloadXlsx(report.id)}
+                      className="flex items-center gap-2 px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700"
+                    >
+                      <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                      </svg>
+                      Excel
+                    </button>
+                  </div>
                 </div>
 
                 {/* Stats */}

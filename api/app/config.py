@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     salesforce_client_id: str = ""
     salesforce_client_secret: str = ""
     salesforce_redirect_uri: str = "http://localhost:3000/api/salesforce/callback"
+    # OAuth login host. Defaults to production; set to https://test.salesforce.com
+    # (or a sandbox My Domain URL) to connect a SANDBOX org.
+    salesforce_login_url: str = "https://login.salesforce.com"
 
     # Encryption
     encryption_key: str  # 32-byte key for AES-256

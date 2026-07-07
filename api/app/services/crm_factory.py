@@ -50,7 +50,9 @@ async def get_crm_services(user_id: str, connection_id: str) -> Tuple[Any, Any, 
         from app.services.salesforce_merge import SalesforceMergeService
 
         service = SalesforceService()
-        connection = await service.get_connection(owner_id)
+        # Multi-org: resolve the SPECIFIC connection (by id), not the owner's single
+        # SF connection, so scans/merges use the right org's token.
+        connection = await service.get_connection_by_id(connection_id)
         if not connection:
             raise Exception("Salesforce connection not found or expired")
 

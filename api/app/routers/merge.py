@@ -104,14 +104,19 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
         # prior (partial) run so we never re-merge a deleted record.
         merge_operations = []
         for dup_set in duplicate_sets:
+            # Records the reviewer marked "not a duplicate" are never merged — they
+            # stay as standalone records. "Fully merged" is judged against the KEPT
+            # losers only, so excluding some records still lets the set complete.
+            excluded = set(dup_set.get("excluded_record_ids") or [])
             already = set(dup_set.get("merged_loser_ids") or [])
-            remaining = [l for l in dup_set["loser_record_ids"] if l not in already]
+            target_losers = [l for l in dup_set["loser_record_ids"] if l not in excluded]
+            remaining = [l for l in target_losers if l not in already]
             merge_operations.append({
                 "set_id": dup_set["id"],
                 "winner_id": dup_set["winner_record_id"],
                 "loser_ids": remaining,
                 "already_merged": list(already),
-                "all_loser_ids": list(dup_set["loser_record_ids"]),  # full original set
+                "all_loser_ids": list(target_losers),  # kept losers (excludes excluded)
                 "blended_properties": dup_set.get("merged_preview", {}),
                 # Pre-merge snapshots (captured at scan time; not mutated by merge) —
                 # backed up before the irreversible merge below.

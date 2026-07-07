@@ -1,6 +1,6 @@
 """Report endpoints."""
 from fastapi import APIRouter, HTTPException, Depends
-from fastapi.responses import Response
+from fastapi.responses import Response, HTMLResponse
 
 from app.auth import require_user
 from app.services.reports import ReportService
@@ -98,6 +98,40 @@ async def download_report_pdf(report_id: str, user_id: str = Depends(require_use
             media_type="application/pdf",
             headers={
                 "Content-Disposition": f"attachment; filename=dedup-report-{report_id[:8]}.pdf"
+            },
+        )
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{report_id}/html")
+async def view_report_html(report_id: str, user_id: str = Depends(require_user)):
+    """View the report as HTML (weasyprint-free; printable to PDF from the browser)."""
+    supabase = get_supabase()
+    _assert_report_access(supabase, report_id, user_id)
+
+    service = ReportService()
+    try:
+        html = await service.generate_html(report_id, user_id)
+        return HTMLResponse(content=html)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/{report_id}/xlsx")
+async def download_report_xlsx(report_id: str, user_id: str = Depends(require_user)):
+    """Download the merged-record detail as an Excel workbook (all fields as columns)."""
+    supabase = get_supabase()
+    _assert_report_access(supabase, report_id, user_id)
+
+    service = ReportService()
+    try:
+        data = await service.generate_xlsx(report_id, user_id)
+        return Response(
+            content=data,
+            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={
+                "Content-Disposition": f"attachment; filename=dedup-report-{report_id[:8]}.xlsx"
             },
         )
     except Exception as e:

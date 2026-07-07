@@ -343,6 +343,9 @@ class UpdateDuplicateSetRequest(BaseModel):
     # The reviewer's decision. 'approved' is the ONLY way a set becomes mergeable
     # (the merge executor refuses anything that isn't approved).
     decision: Optional[str] = None  # 'approved' | 'excluded' | 'escalated' | 'pending'
+    # Specific record ids the reviewer marked "not a duplicate" — excluded from the
+    # merge (left untouched), without discarding the whole set.
+    excluded_record_ids: Optional[List[str]] = None
 
 
 _ALLOWED_DECISIONS = {"approved", "excluded", "escalated", "pending"}
@@ -367,6 +370,8 @@ async def update_duplicate_set(
         update_data["decision"] = "excluded" if request.excluded else "pending"
     if request.merged_preview is not None:
         update_data["merged_preview"] = request.merged_preview
+    if request.excluded_record_ids is not None:
+        update_data["excluded_record_ids"] = request.excluded_record_ids
     if request.decision is not None:
         if request.decision not in _ALLOWED_DECISIONS:
             raise HTTPException(status_code=400, detail="Invalid decision.")

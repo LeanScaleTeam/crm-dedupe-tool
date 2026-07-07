@@ -131,20 +131,25 @@ def _ensure_owner_membership(supabase, tenant_id: str, user_id: str) -> None:
 
 
 def resolve_tenant_for_save(
-    supabase, user_id: str, crm_type: str, label: Optional[str]
+    supabase, user_id: str, crm_type: str, label: Optional[str], org_id: Optional[str] = None
 ) -> str:
     """Return the tenant_id to stamp on a connection being saved (tenant = org).
 
-    If this user already has a connection of this crm_type, reuse its tenant (so
-    re-saving tokens never spawns a duplicate tenant). Otherwise create a fresh
-    tenant — client access OFF by default — and make the connecting user its owner.
+    Multi-org: reuse the tenant of an existing connection to the SAME org (so
+    re-saving tokens for an org never spawns a duplicate tenant), but a DIFFERENT
+    org gets its own fresh tenant — client access OFF by default — with the
+    connecting user as owner. When org_id is not given, fall back to the legacy
+    one-tenant-per-crm_type behavior.
 
     Must be called BEFORE inserting the connection, because crm_connections.tenant_id
     is NOT NULL.
     """
-    existing = supabase.table("crm_connections").select("tenant_id").eq(
+    q = supabase.table("crm_connections").select("tenant_id").eq(
         "user_id", user_id
-    ).eq("crm_type", crm_type).execute()
+    ).eq("crm_type", crm_type)
+    if org_id is not None:
+        q = q.eq("org_id", org_id)
+    existing = q.execute()
     rows = existing.data or []
     if rows and rows[0].get("tenant_id"):
         tenant_id = rows[0]["tenant_id"]

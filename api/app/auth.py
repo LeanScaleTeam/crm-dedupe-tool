@@ -6,9 +6,13 @@ as any user — including triggering a production merge. This module replaces th
 with real authentication: every protected endpoint derives the user id from a
 verified Supabase JWT, never from the request body.
 
-Supabase issues HS256 access tokens signed with the project's JWT secret
-(Project Settings → API → JWT Settings). We verify the signature + expiry + the
-`authenticated` audience and return the `sub` claim (the auth.users UUID).
+Supabase projects issue access tokens with either:
+  * asymmetric JWT signing keys (ES256/RS256) — verified against the project's
+    published JWKS at `<SUPABASE_URL>/auth/v1/.well-known/jwks.json`; or
+  * the legacy HS256 shared secret (SUPABASE_JWT_SECRET) — used by older projects
+    and by the integration test harness, which mints its own HS256 tokens.
+We pick the path from the token header's `alg`, then verify signature + expiry +
+the `authenticated` audience and return the `sub` claim (the auth.users UUID).
 
 NOTE: the DB client still uses the service-role key (RLS bypassed), so verifying
 the token is necessary but NOT sufficient — protected endpoints must ALSO check
@@ -17,7 +21,10 @@ explicitly. See merge.py / scan.py `_assert_scan_access`.
 """
 from __future__ import annotations
 
+from functools import lru_cache
+
 import jwt
+from jwt import PyJWKClient
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -25,33 +32,57 @@ from app.config import get_settings
 
 _bearer = HTTPBearer(auto_error=True)
 
+# Asymmetric algorithms Supabase may use for JWT signing keys.
+_ASYMMETRIC_ALGS = {"ES256", "ES384", "ES512", "RS256", "RS384", "RS512"}
+
+
+@lru_cache(maxsize=4)
+def _jwk_client(jwks_url: str) -> PyJWKClient:
+    """Cached JWKS client (it also caches fetched signing keys internally)."""
+    return PyJWKClient(jwks_url)
+
 
 def verify_supabase_jwt(token: str) -> str:
     """Verify a Supabase access token and return its user id (`sub`).
 
-    Raises HTTPException(401) on any failure. Fails closed if the JWT secret is
-    not configured (so a misconfigured deploy cannot silently accept anyone).
+    Raises HTTPException(401) on any verification failure.
     """
     settings = get_settings()
-    secret = settings.supabase_jwt_secret
-    if not secret:
-        # Fail closed: no secret means we cannot verify anyone.
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Auth not configured (SUPABASE_JWT_SECRET missing).",
-        )
+
     try:
-        payload = jwt.decode(
-            token,
-            secret,
-            algorithms=["HS256"],
-            audience="authenticated",
-            options={"require": ["exp", "sub"]},
-        )
+        alg = jwt.get_unverified_header(token).get("alg", "HS256")
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+
+    decode_kwargs = dict(
+        audience="authenticated",
+        options={"require": ["exp", "sub"]},
+    )
+
+    try:
+        if alg in _ASYMMETRIC_ALGS:
+            # New Supabase JWT signing keys — verify against the project JWKS.
+            jwks_url = f"{settings.supabase_url.rstrip('/')}/auth/v1/.well-known/jwks.json"
+            signing_key = _jwk_client(jwks_url).get_signing_key_from_jwt(token)
+            payload = jwt.decode(token, signing_key.key, algorithms=[alg], **decode_kwargs)
+        else:
+            # Legacy HS256 shared-secret tokens (and the integration harness).
+            secret = settings.supabase_jwt_secret
+            if not secret:
+                # Fail closed: no secret means we cannot verify HS256 tokens.
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail="Auth not configured (SUPABASE_JWT_SECRET missing).",
+                )
+            payload = jwt.decode(token, secret, algorithms=["HS256"], **decode_kwargs)
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired.")
     except jwt.InvalidTokenError as e:
         raise HTTPException(status_code=401, detail=f"Invalid token: {e}")
+    except HTTPException:
+        raise
+    except Exception as e:  # JWKS fetch / key-resolution failures, etc.
+        raise HTTPException(status_code=401, detail=f"Token verification failed: {e}")
 
     sub = payload.get("sub")
     if not sub:

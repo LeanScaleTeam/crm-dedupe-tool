@@ -14,19 +14,19 @@ export default async function ConnectPage({
     redirect('/login')
   }
 
-  // Check if user already has a CRM connection
-  const { data: connection } = await supabase
+  // All the user's connected orgs (multi-org).
+  const { data: connections } = await supabase
     .from('crm_connections')
     .select('*')
     .eq('user_id', user.id)
-    .single()
+    .order('created_at', { ascending: true })
 
   const { error, connected } = await searchParams
 
   return (
     <ConnectClient
       user={user}
-      existingConnection={connection}
+      connections={connections ?? []}
       oauthError={error}
       oauthSuccess={!!connected}
     />

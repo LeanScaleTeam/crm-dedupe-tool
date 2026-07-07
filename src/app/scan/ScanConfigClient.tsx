@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { useRouter } from 'next/navigation'
 import { apiFetch } from '@/lib/api'
+import AppNav from '@/components/AppNav'
 
 interface CrmConnection {
   id: string
@@ -107,6 +108,7 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <AppNav />
       <div className="max-w-3xl mx-auto py-12 px-4">
         {/* Header */}
         <div className="mb-8">

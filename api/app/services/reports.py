@@ -103,6 +103,42 @@ class ReportService:
             },
         }
 
+        # Per-record detail: for each merged set, the surviving record + the records
+        # merged into it, with ALL captured fields (from the pre-merge backups).
+        report_fields = [
+            {"key": "first_name", "label": "First Name"},
+            {"key": "last_name", "label": "Last Name"},
+            {"key": "email", "label": "Email"},
+            {"key": "phone", "label": "Phone"},
+            {"key": "company", "label": "Company"},
+            {"key": "job_title", "label": "Job Title"},
+            {"key": "created_at", "label": "Created"},
+            {"key": "updated_at", "label": "Updated"},
+            {"key": "association_count", "label": "Associations"},
+        ]
+
+        def _record(c: dict, role: str) -> dict:
+            c = c or {}
+            rec = {"role": role, "id": c.get("id")}
+            for f in report_fields:
+                rec[f["key"]] = c.get(f["key"])
+            return rec
+
+        backups = self.supabase.table("merge_backups").select(
+            "winner_snapshot,loser_record_ids,loser_snapshot"
+        ).eq("merge_id", merge_id).execute()
+
+        merged_sets = []
+        for b in (backups.data or []):
+            snaps = b.get("loser_snapshot") or []
+            kept_ids = set(b.get("loser_record_ids") or [])
+            losers = [l for l in snaps if (not kept_ids) or (l or {}).get("id") in kept_ids]
+            records = [_record(b.get("winner_snapshot") or {}, "Surviving")]
+            records += [_record(l, "Merged") for l in losers]
+            merged_sets.append({"records": records})
+        report_data["merged_sets"] = merged_sets
+        report_data["report_fields"] = report_fields
+
         # Save report (stamped with the merge's tenant; user_id is the actor).
         report_id = await self._save_report(
             merge_id, user_id, merge["tenant_id"], report_data
@@ -168,11 +204,121 @@ class ReportService:
 
         return pdf_bytes
 
+    async def generate_html(self, report_id: str, user_id: str) -> str:
+        """Standalone HTML report — no native libraries required (weasyprint-free).
+        Same content as the PDF, with the report CSS inlined so it renders on its
+        own; viewable in the browser and printable to PDF from there."""
+        result = self.supabase.table("reports").select("*").eq(
+            "id", report_id
+        ).limit(1).execute()
+        row = (result.data or [None])[0]
+
+        if not row or not can_access_tenant(
+            self.supabase, row.get("tenant_id"), user_id
+        ):
+            raise Exception("Report not found")
+
+        report = row["report_data"]
+        html = self._generate_html(report)
+        style = f"<style>{self._get_pdf_styles()}</style>"
+        if "</head>" in html:
+            return html.replace("</head>", style + "</head>", 1)
+        if "<body" in html:
+            return html.replace("<body", style + "<body", 1)
+        return style + html
+
+    async def generate_xlsx(self, report_id: str, user_id: str) -> bytes:
+        """Excel workbook of the merged-record detail — one row per record, every
+        captured field as a column. Pure-Python (openpyxl), no native libraries."""
+        import io
+        from openpyxl import Workbook
+        from openpyxl.styles import Font, PatternFill, Alignment
+
+        result = self.supabase.table("reports").select("*").eq(
+            "id", report_id
+        ).limit(1).execute()
+        row = (result.data or [None])[0]
+        if not row or not can_access_tenant(
+            self.supabase, row.get("tenant_id"), user_id
+        ):
+            raise Exception("Report not found")
+
+        report = row["report_data"]
+        merged_sets = report.get("merged_sets", []) or []
+        fields = report.get("report_fields") or []
+
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Merged Records"
+        ws.append(["Set", "Role", "Record ID"] + [f["label"] for f in fields])
+        for cell in ws[1]:
+            cell.font = Font(bold=True, color="FFFFFF")
+            cell.fill = PatternFill("solid", fgColor="642585")
+            cell.alignment = Alignment(horizontal="left")
+        ws.freeze_panes = "A2"
+
+        for i, s in enumerate(merged_sets, 1):
+            for r in (s.get("records") or []):
+                ws.append([i, r.get("role"), r.get("id")] + [r.get(f["key"]) for f in fields])
+
+        for col in ws.columns:
+            longest = max((len(str(c.value)) for c in col if c.value is not None), default=8)
+            ws.column_dimensions[col[0].column_letter].width = min(max(longest + 2, 10), 42)
+
+        buf = io.BytesIO()
+        wb.save(buf)
+        return buf.getvalue()
+
     def _generate_html(self, report: dict) -> str:
         """Generate HTML for PDF."""
         scan = report.get("scan", {})
         merge = report.get("merge", {})
         summary = report.get("summary", {})
+        merged_sets = report.get("merged_sets", []) or []
+        report_fields = report.get("report_fields") or []
+
+        def _esc(v: object) -> str:
+            return str(v if v not in (None, "") else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+        def _rname(r: dict) -> str:
+            return " ".join(p for p in [r.get("first_name"), r.get("last_name")] if p) or r.get("email") or "(record)"
+
+        set_blocks = []
+        for i, s in enumerate(merged_sets, 1):
+            records = s.get("records") or []
+            if not records:
+                continue
+            # Only show fields that are populated on at least one record in this set.
+            fields = [f for f in report_fields if any(r.get(f["key"]) not in (None, "") for r in records)]
+            surv = "background:#eafaf0"
+            ths = "".join(
+                f"<th style='text-align:left;padding:6px;border-bottom:2px solid #ccc;{surv if r.get('role')=='Surviving' else ''}'>"
+                f"{'&#10003; ' if r.get('role')=='Surviving' else ''}{_esc(_rname(r))}"
+                f"<br><span style='font-weight:normal;color:#888;font-size:11px'>{_esc(r.get('role'))}</span></th>"
+                for r in records
+            )
+            body = ""
+            for f in fields:
+                tds = "".join(
+                    f"<td style='padding:6px;border-bottom:1px solid #eee;{'background:#f4fbf7' if r.get('role')=='Surviving' else ''}'>{_esc(r.get(f['key']))}</td>"
+                    for r in records
+                )
+                body += (
+                    f"<tr><td style='padding:6px;border-bottom:1px solid #eee;color:#666;font-weight:600'>{_esc(f['label'])}</td>{tds}</tr>"
+                )
+            set_blocks.append(
+                f"<h3 style='margin:18px 0 6px'>Set {i}</h3>"
+                "<table style='width:100%;border-collapse:collapse;font-size:12px'>"
+                "<thead><tr><th style='text-align:left;padding:6px;border-bottom:2px solid #ccc'>Field</th>"
+                f"{ths}</tr></thead><tbody>{body}</tbody></table>"
+            )
+
+        merged_section = ""
+        if set_blocks:
+            merged_section = (
+                f"<div class='section'><h2>Merged Records ({len(merged_sets)} sets)</h2>"
+                f"{''.join(set_blocks)}</div>"
+            )
 
         return f"""
         <!DOCTYPE html>
@@ -250,6 +396,8 @@ class ReportService:
                     </tr>
                 </table>
             </div>
+
+            {merged_section}
 
             <div class="footer">
                 <p>Report generated by CRM Dedup Tool</p>

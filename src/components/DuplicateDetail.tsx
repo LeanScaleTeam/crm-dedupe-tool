@@ -28,6 +28,7 @@ interface DuplicateSet {
   merged_preview: Record<string, unknown>
   excluded: boolean
   merged: boolean
+  excluded_record_ids?: string[]
 }
 
 interface DuplicateDetailProps {
@@ -82,18 +83,21 @@ export default function DuplicateDetail({
   // Initialize merged preview from the stored preview or build from winner
   const [mergedPreview, setMergedPreview] = useState<Record<string, unknown>>(() => {
     const preview = { ...duplicateSet.merged_preview }
-    // Ensure all editable fields have a value
     for (const { key } of EDITABLE_FIELDS) {
       if (preview[key] === undefined) {
         preview[key] = getFieldValue(winner, key) || ''
       }
     }
-    // Ensure metadata from winner
     if (!preview.created_at) preview.created_at = winner.created_at
     if (!preview.updated_at) preview.updated_at = winner.updated_at
     if (preview.association_count === undefined) preview.association_count = winner.association_count
     return preview
   })
+
+  // Records the reviewer marked "not a duplicate" — excluded from the merge.
+  const [excludedIds, setExcludedIds] = useState<Set<string>>(
+    () => new Set(duplicateSet.excluded_record_ids || [])
+  )
 
   const [isSaving, setIsSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
@@ -103,7 +107,21 @@ export default function DuplicateDetail({
     setHasChanges(true)
   }, [])
 
-  const savePreview = useCallback(async () => {
+  const toggleExcluded = useCallback((recordId?: string) => {
+    if (!recordId) return
+    setExcludedIds(prev => {
+      const next = new Set(prev)
+      if (next.has(recordId)) next.delete(recordId)
+      else next.add(recordId)
+      return next
+    })
+    setHasChanges(true)
+  }, [])
+
+  const excludedCount = losers.filter(l => l.id && excludedIds.has(l.id)).length
+  const mergingCount = allContacts.length - excludedCount // winner + kept losers
+
+  const saveChanges = useCallback(async () => {
     setIsSaving(true)
     try {
       const response = await apiFetch(
@@ -111,7 +129,10 @@ export default function DuplicateDetail({
         {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ merged_preview: mergedPreview }),
+          body: JSON.stringify({
+            merged_preview: mergedPreview,
+            excluded_record_ids: Array.from(excludedIds),
+          }),
         }
       )
       if (response.ok) {
@@ -119,11 +140,11 @@ export default function DuplicateDetail({
         onPreviewUpdated?.(duplicateSet.id, mergedPreview)
       }
     } catch (error) {
-      console.error('Failed to save preview:', error)
+      console.error('Failed to save changes:', error)
     } finally {
       setIsSaving(false)
     }
-  }, [scanId, duplicateSet.id, mergedPreview, onPreviewUpdated])
+  }, [scanId, duplicateSet.id, mergedPreview, excludedIds, onPreviewUpdated])
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
@@ -140,7 +161,12 @@ export default function DuplicateDetail({
                 Duplicate Set Details
               </h2>
               <p className="text-sm text-gray-500 mt-1">
-                {allContacts.length} records with {duplicateSet.confidence.toFixed(0)}% match confidence
+                {allContacts.length} records · {duplicateSet.confidence.toFixed(0)}% match
+                {excludedCount > 0 && (
+                  <span className="text-amber-700">
+                    {' '}· merging {mergingCount}, {excludedCount} excluded
+                  </span>
+                )}
               </p>
             </div>
             <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
@@ -154,7 +180,8 @@ export default function DuplicateDetail({
           <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
             {/* Instructions */}
             <div className="mb-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-800">
-              Click any field value to use it in the merged result.
+              Click any field value to use it in the merged result. Use <strong>Not a duplicate</strong> on a
+              record to exclude it from the merge (it stays untouched).
             </div>
 
             {/* Comparison Table */}
@@ -172,14 +199,23 @@ export default function DuplicateDetail({
                         <span className="text-xs text-green-500">(Winner)</span>
                       </div>
                     </th>
-                    {losers.map((loser, idx) => (
-                      <th key={idx} className="text-left py-3 px-4 text-sm font-medium text-gray-600 bg-gray-50">
-                        <div className="flex items-center gap-2">
-                          <span className="w-6 h-6 bg-gray-400 text-white rounded-full flex items-center justify-center text-xs font-bold">L</span>
-                          {getContactName(loser)}
-                        </div>
-                      </th>
-                    ))}
+                    {losers.map((loser, idx) => {
+                      const isExcluded = !!(loser.id && excludedIds.has(loser.id))
+                      return (
+                        <th key={idx} className={`text-left py-3 px-4 text-sm font-medium bg-gray-50 ${isExcluded ? 'opacity-50' : 'text-gray-600'}`}>
+                          <div className="flex items-center gap-2">
+                            <span className="w-6 h-6 bg-gray-400 text-white rounded-full flex items-center justify-center text-xs font-bold">L</span>
+                            <span className={isExcluded ? 'line-through text-gray-500' : ''}>{getContactName(loser)}</span>
+                          </div>
+                          <button
+                            onClick={() => toggleExcluded(loser.id)}
+                            className={`mt-1 text-xs font-medium ${isExcluded ? 'text-blue-600 hover:text-blue-700' : 'text-red-500 hover:text-red-600'}`}
+                          >
+                            {isExcluded ? '↺ Include' : '✕ Not a duplicate'}
+                          </button>
+                        </th>
+                      )
+                    })}
                     <th className="text-left py-3 px-4 text-sm font-medium text-blue-700 bg-blue-50">
                       <div className="flex items-center gap-2">
                         <span className="w-6 h-6 bg-blue-500 text-white rounded-full flex items-center justify-center text-xs font-bold">M</span>
@@ -199,25 +235,26 @@ export default function DuplicateDetail({
                           const val = getFieldValue(contact, key)
                           const isSelected = val && val === mergedVal
                           const isEmpty = !val
+                          const colExcluded = idx > 0 && !!contact.id && excludedIds.has(contact.id)
                           return (
                             <td
                               key={idx}
-                              className={`py-3 px-4 text-sm cursor-pointer transition-colors ${
+                              className={`py-3 px-4 text-sm transition-colors ${
                                 idx === 0 ? 'bg-green-50' : 'bg-gray-50'
-                              } ${
-                                isSelected
+                              } ${colExcluded ? 'opacity-40 cursor-not-allowed line-through' : 'cursor-pointer'} ${
+                                isSelected && !colExcluded
                                   ? 'ring-2 ring-inset ring-blue-500 font-medium text-blue-900'
                                   : isEmpty
                                   ? 'text-gray-300'
-                                  : 'text-gray-900 hover:bg-blue-50'
+                                  : `text-gray-900 ${colExcluded ? '' : 'hover:bg-blue-50'}`
                               }`}
                               onClick={() => {
-                                if (val) pickFieldValue(key, val)
+                                if (val && !colExcluded) pickFieldValue(key, val)
                               }}
-                              title={val ? `Click to use this value` : ''}
+                              title={colExcluded ? 'Excluded record' : val ? 'Click to use this value' : ''}
                             >
                               {val || '-'}
-                              {isSelected && (
+                              {isSelected && !colExcluded && (
                                 <span className="ml-1.5 text-blue-500 text-xs">&#10003;</span>
                               )}
                             </td>
@@ -244,8 +281,9 @@ export default function DuplicateDetail({
                       {allContacts.map((contact, idx) => {
                         const raw = getFieldValue(contact, key)
                         const display = format === 'date' ? formatDate(raw) : (raw || '-')
+                        const colExcluded = idx > 0 && !!contact.id && excludedIds.has(contact.id)
                         return (
-                          <td key={idx} className={`py-3 px-4 text-sm text-gray-600 ${idx === 0 ? 'bg-green-50' : 'bg-gray-50'}`}>
+                          <td key={idx} className={`py-3 px-4 text-sm text-gray-600 ${idx === 0 ? 'bg-green-50' : 'bg-gray-50'} ${colExcluded ? 'opacity-40 line-through' : ''}`}>
                             {display}
                           </td>
                         )
@@ -274,8 +312,12 @@ export default function DuplicateDetail({
                   Winner record (selected by your merge rules)
                 </li>
                 <li className="flex items-center gap-2">
+                  <span className="text-red-500 text-xs font-bold">✕</span>
+                  <strong>Not a duplicate</strong> — excludes that record; it won&apos;t be merged and stays untouched
+                </li>
+                <li className="flex items-center gap-2">
                   <span className="w-3 h-3 bg-blue-500 rounded-full"></span>
-                  Final merged result — what will be written to HubSpot
+                  Final merged result — what will be written to your CRM
                 </li>
               </ul>
             </div>
@@ -292,7 +334,7 @@ export default function DuplicateDetail({
               </button>
               {hasChanges && (
                 <button
-                  onClick={savePreview}
+                  onClick={saveChanges}
                   disabled={isSaving}
                   className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50"
                 >

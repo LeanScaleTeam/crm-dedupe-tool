@@ -31,5 +31,8 @@ pydantic-settings==2.1.0
 pytest==7.4.4
 pytest-asyncio==0.23.4
 
-# PDF generation
+# PDF generation (optional; needs native libs — HTML report is the default)
 weasyprint==60.2
+
+# Excel export (pure Python — no native libs)
+openpyxl==3.1.5

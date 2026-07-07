@@ -37,23 +37,46 @@ class SalesforceService:
     def __init__(self):
         self.settings = get_settings()
         self.supabase = get_supabase()
+        # OAuth base — defaults to the production login host; override via
+        # SALESFORCE_LOGIN_URL (e.g. https://test.salesforce.com or a sandbox
+        # My Domain URL) to connect a SANDBOX org.
+        self.AUTH_URL = f"{self.settings.salesforce_login_url.rstrip('/')}/services/oauth2"
 
     async def exchange_code_for_tokens(
         self,
         code: str,
-        redirect_uri: str
+        redirect_uri: str,
+        code_verifier: Optional[str] = None,
+        login_url: Optional[str] = None,
     ) -> SalesforceTokens:
-        """Exchange OAuth authorization code for access tokens."""
+        """Exchange OAuth authorization code for access tokens.
+
+        Supports both a confidential client (client_secret) and a public client
+        with PKCE (code_verifier, no secret). Salesforce External Client Apps
+        require PKCE, so we send client_secret only if one is configured and
+        code_verifier only if the caller supplied one.
+
+        `login_url` overrides the OAuth host for THIS exchange (multi-org: the
+        token endpoint must match the host the user authorized at — production vs
+        a sandbox). Falls back to the configured default.
+        """
+        token_base = (
+            f"{login_url.rstrip('/')}/services/oauth2" if login_url else self.AUTH_URL
+        )
+        data = {
+            "grant_type": "authorization_code",
+            "client_id": self.settings.salesforce_client_id,
+            "redirect_uri": redirect_uri,
+            "code": code,
+        }
+        if self.settings.salesforce_client_secret:
+            data["client_secret"] = self.settings.salesforce_client_secret
+        if code_verifier:
+            data["code_verifier"] = code_verifier
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{self.AUTH_URL}/token",
-                data={
-                    "grant_type": "authorization_code",
-                    "client_id": self.settings.salesforce_client_id,
-                    "client_secret": self.settings.salesforce_client_secret,
-                    "redirect_uri": redirect_uri,
-                    "code": code,
-                },
+                f"{token_base}/token",
+                data=data,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
 
@@ -139,20 +162,25 @@ class SalesforceService:
         # Resolve the tenant BEFORE the upsert (crm_connections.tenant_id is NOT
         # NULL). tenant = connected org: reuse this user's existing salesforce tenant
         # or create a fresh one (client access off) with the user as owner.
-        tenant_id = resolve_tenant_for_save(self.supabase, user_id, "salesforce", org_id)
+        tenant_id = resolve_tenant_for_save(
+            self.supabase, user_id, "salesforce", org_id, org_id=org_id
+        )
 
-        # Store instance URL in portal_id field for retrieval
+        # Multi-org: one row per (user, crm_type, org). Re-connecting an org updates
+        # in place; a new org adds a row. org_id is a first-class column now, though
+        # portal_id keeps "<org_id>|<instance_url>" for backwards compatibility.
         result = self.supabase.table("crm_connections").upsert(
             {
                 "user_id": user_id,
                 "tenant_id": tenant_id,
                 "crm_type": "salesforce",
+                "org_id": org_id,
                 "access_token_encrypted": encrypted_access,
                 "refresh_token_encrypted": encrypted_refresh,
-                "portal_id": f"{org_id}|{tokens.instance_url}",  # Store both
+                "portal_id": f"{org_id}|{tokens.instance_url}",
                 "expires_at": expires_at.isoformat(),
             },
-            on_conflict="user_id,crm_type",
+            on_conflict="user_id,crm_type,org_id",
         ).execute()
 
         return result.data[0] if result.data else None
@@ -199,6 +227,35 @@ class SalesforceService:
                 pass
 
         # Decrypt and return existing
+        return SalesforceConnection(
+            id=conn["id"],
+            user_id=conn["user_id"],
+            org_id=org_id,
+            instance_url=instance_url,
+            access_token=decrypt_token(conn["access_token_encrypted"]),
+            refresh_token=decrypt_token(conn["refresh_token_encrypted"]),
+        )
+
+    async def get_connection_by_id(self, connection_id: str) -> Optional[SalesforceConnection]:
+        """Get ONE specific Salesforce connection by its row id (multi-org).
+
+        Unlike get_connection (which resolves the user's single SF connection),
+        this targets an exact connected org so scans/merges act on the right token.
+        """
+        result = self.supabase.table("crm_connections").select("*").eq(
+            "id", connection_id
+        ).single().execute()
+        conn = result.data
+        if not conn:
+            return None
+
+        portal_data = conn.get("portal_id") or ""
+        if "|" in portal_data:
+            org_id, instance_url = portal_data.split("|", 1)
+        else:
+            org_id = conn.get("org_id") or portal_data
+            instance_url = "https://login.salesforce.com"
+
         return SalesforceConnection(
             id=conn["id"],
             user_id=conn["user_id"],

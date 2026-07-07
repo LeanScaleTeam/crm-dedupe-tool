@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation'
 import { apiFetch } from '@/lib/api'
 import DuplicateCard from '@/components/DuplicateCard'
 import DuplicateDetail from '@/components/DuplicateDetail'
+import AppNav from '@/components/AppNav'
 
 interface Scan {
   id: string
@@ -179,6 +180,7 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
 
   return (
     <div className="min-h-screen bg-gray-50">
+      <AppNav />
       <div className="max-w-6xl mx-auto py-8 px-4">
         {/* Header */}
         <div className="mb-6">

@@ -68,3 +68,6 @@ celerybeat.pid
 
 # Local Netlify folder
 .netlify
+
+# working notes (not product code)
+Task Summaries/
