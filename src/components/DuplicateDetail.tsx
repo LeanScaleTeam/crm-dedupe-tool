@@ -106,8 +106,14 @@ export default function DuplicateDetail({
   onClose,
   onPreviewUpdated,
 }: DuplicateDetailProps) {
-  const winner = duplicateSet.winner_data
-  const losers = duplicateSet.loser_data
+  // Winner is changeable in the UI: derive it from a local winnerId (defaults to the
+  // scan-selected winner). allRecords = the original winner + all losers.
+  const allRecords = [duplicateSet.winner_data, ...duplicateSet.loser_data]
+  const [winnerId, setWinnerId] = useState<string | undefined>(
+    duplicateSet.winner_record_id ?? duplicateSet.winner_data?.id
+  )
+  const winner = allRecords.find(r => r.id === winnerId) ?? duplicateSet.winner_data
+  const losers = allRecords.filter(r => r.id !== winner.id)
   const allContacts = [winner, ...losers]
   // Contacts and companies expose different editable fields; pick by record shape.
   const EDITABLE_FIELDS = isCompanyRecord(winner) ? COMPANY_EDITABLE_FIELDS : CONTACT_EDITABLE_FIELDS
@@ -200,6 +206,20 @@ export default function DuplicateDetail({
     setHasChanges(true)
   }, [])
 
+  // Promote a record to winner (the survivor). The old winner becomes a loser; a
+  // promoted record can't also be marked "not a duplicate".
+  const makeWinner = useCallback((recordId?: string) => {
+    if (!recordId) return
+    setWinnerId(recordId)
+    setExcludedIds(prev => {
+      if (!prev.has(recordId)) return prev
+      const next = new Set(prev)
+      next.delete(recordId)
+      return next
+    })
+    setHasChanges(true)
+  }, [])
+
   const excludedCount = losers.filter(l => l.id && excludedIds.has(l.id)).length
   const mergingCount = allContacts.length - excludedCount // winner + kept losers
 
@@ -215,6 +235,7 @@ export default function DuplicateDetail({
           body: JSON.stringify({
             merged_preview: mergedPreview,
             excluded_record_ids: Array.from(excludedIds),
+            winner_record_id: winnerId,
           }),
         }
       )
@@ -230,7 +251,7 @@ export default function DuplicateDetail({
     } finally {
       setIsSaving(false)
     }
-  }, [scanId, duplicateSet.id, mergedPreview, excludedIds, onPreviewUpdated])
+  }, [scanId, duplicateSet.id, mergedPreview, excludedIds, winnerId, onPreviewUpdated])
 
   return (
     <div className="fixed inset-0 z-50 overflow-y-auto">
@@ -239,9 +260,9 @@ export default function DuplicateDetail({
 
       {/* Modal */}
       <div className="relative min-h-screen flex items-center justify-center p-4">
-        <div className="relative bg-white rounded-xl shadow-xl max-w-5xl w-full max-h-[90vh] overflow-hidden">
+        <div className="relative bg-white rounded-xl shadow-xl max-w-5xl w-full max-h-[90vh] flex flex-col overflow-hidden">
           {/* Header */}
-          <div className="sticky top-0 bg-white border-b px-6 py-4 flex items-center justify-between z-10">
+          <div className="flex-shrink-0 bg-white border-b px-6 py-4 flex items-center justify-between z-10">
             <div>
               <h2 className="text-xl font-semibold text-gray-900">
                 Duplicate Set Details
@@ -263,7 +284,7 @@ export default function DuplicateDetail({
           </div>
 
           {/* Content */}
-          <div className="p-6 overflow-y-auto max-h-[calc(90vh-140px)]">
+          <div className="p-6 overflow-y-auto flex-1 min-h-0">
             {/* Instructions */}
             <div className="mb-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-800">
               Click any field value to use it in the merged result. Use <strong>Not a duplicate</strong> on a
@@ -293,12 +314,20 @@ export default function DuplicateDetail({
                             <span className="w-6 h-6 bg-gray-400 text-white rounded-full flex items-center justify-center text-xs font-bold">L</span>
                             <span className={isExcluded ? 'line-through text-gray-500' : ''}>{getContactName(loser)}</span>
                           </div>
-                          <button
-                            onClick={() => toggleExcluded(loser.id)}
-                            className={`mt-1 text-xs font-medium ${isExcluded ? 'text-blue-600 hover:text-blue-700' : 'text-red-500 hover:text-red-600'}`}
-                          >
-                            {isExcluded ? '↺ Include' : '✕ Not a duplicate'}
-                          </button>
+                          <div className="mt-1 flex items-center gap-3">
+                            <button
+                              onClick={() => makeWinner(loser.id)}
+                              className="text-xs font-medium text-green-600 hover:text-green-700"
+                            >
+                              ★ Make winner
+                            </button>
+                            <button
+                              onClick={() => toggleExcluded(loser.id)}
+                              className={`text-xs font-medium ${isExcluded ? 'text-blue-600 hover:text-blue-700' : 'text-red-500 hover:text-red-600'}`}
+                            >
+                              {isExcluded ? '↺ Include' : '✕ Not a duplicate'}
+                            </button>
+                          </div>
                         </th>
                       )
                     })}
@@ -517,7 +546,7 @@ export default function DuplicateDetail({
           </div>
 
           {/* Footer */}
-          <div className="sticky bottom-0 bg-white border-t px-6 py-4 flex justify-between items-center">
+          <div className="flex-shrink-0 bg-white border-t px-6 py-4 flex justify-between items-center">
             <div className="text-sm text-gray-500">
               {saveError ? (
                 <span className="text-red-600">{saveError}</span>

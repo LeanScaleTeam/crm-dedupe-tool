@@ -495,6 +495,9 @@ class UpdateDuplicateSetRequest(BaseModel):
     # Specific record ids the reviewer marked "not a duplicate" — excluded from the
     # merge (left untouched), without discarding the whole set.
     excluded_record_ids: Optional[List[str]] = None
+    # Promote a different record to winner (the survivor kept on merge). The backend
+    # recomputes loser_record_ids + winner_data/loser_data from the set's records.
+    winner_record_id: Optional[str] = None
 
 
 _ALLOWED_DECISIONS = {"approved", "excluded", "escalated", "pending"}
@@ -529,6 +532,26 @@ async def update_duplicate_set(
         update_data["decided_at"] = datetime.now(timezone.utc).isoformat()
         if request.decision == "excluded":
             update_data["excluded"] = True
+    if request.winner_record_id is not None:
+        # Recompute the survivor + losers from the set's stored snapshots so the
+        # merge (which uses winner_record_id as master) respects the new choice.
+        cur_rows = supabase.table("duplicate_sets").select(
+            "winner_data,loser_data"
+        ).eq("id", set_id).eq("scan_id", scan_id).eq("merged", False).limit(1).execute().data or []
+        cur = cur_rows[0] if cur_rows else None
+        if not cur:
+            raise HTTPException(status_code=404, detail="Duplicate set not found (or already merged).")
+        all_records = [r for r in ([cur.get("winner_data")] + (cur.get("loser_data") or [])) if r]
+        new_winner = next(
+            (r for r in all_records if str(r.get("id")) == str(request.winner_record_id)), None
+        )
+        if not new_winner:
+            raise HTTPException(status_code=400, detail="winner_record_id is not a record in this set.")
+        new_losers = [r for r in all_records if str(r.get("id")) != str(request.winner_record_id)]
+        update_data["winner_record_id"] = request.winner_record_id
+        update_data["winner_data"] = new_winner
+        update_data["loser_record_ids"] = [r.get("id") for r in new_losers]
+        update_data["loser_data"] = new_losers
 
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
