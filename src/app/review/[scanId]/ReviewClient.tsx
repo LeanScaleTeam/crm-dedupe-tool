@@ -45,6 +45,7 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
   const [isLoading, setIsLoading] = useState(true)
   const [isMerging, setIsMerging] = useState(false)
   const [mergeError, setMergeError] = useState<string | null>(null)
+  const [loadError, setLoadError] = useState<string | null>(null)
   const [page, setPage] = useState(1)
   const [totalPages, setTotalPages] = useState(1)
 
@@ -54,6 +55,7 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
 
   const fetchDuplicates = async () => {
     setIsLoading(true)
+    setLoadError(null)
     try {
       const response = await apiFetch(`/scan/${scan.id}/results?page=${page}&per_page=20`)
 
@@ -61,9 +63,12 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
         const data = await response.json()
         setDuplicateSets(data.duplicate_sets)
         setTotalPages(data.total_pages)
+      } else {
+        const data = await response.json().catch(() => ({}))
+        setLoadError(data.detail || `Failed to load duplicates (${response.status}).`)
       }
     } catch (error) {
-      console.error('Failed to fetch duplicates:', error)
+      setLoadError(error instanceof Error ? error.message : 'Failed to load duplicates.')
     } finally {
       setIsLoading(false)
     }
@@ -167,6 +172,7 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
   }
 
   const downloadMatches = async () => {
+    setMergeError(null)
     try {
       const response = await apiFetch(`/scan/${scan.id}/export`)
       if (response.ok) {
@@ -179,9 +185,11 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
         a.click()
         a.remove()
         window.URL.revokeObjectURL(url)
+      } else {
+        setMergeError(`Export failed (${response.status}).`)
       }
     } catch (error) {
-      console.error('Failed to export matches:', error)
+      setMergeError(error instanceof Error ? `Export failed: ${error.message}` : 'Export failed.')
     }
   }
 
@@ -292,7 +300,17 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
         </div>
 
         {/* Duplicate List */}
-        {isLoading ? (
+        {loadError ? (
+          <div className="bg-white rounded-lg shadow p-8 text-center">
+            <p className="text-red-600 mb-3">Couldn&apos;t load duplicates: {loadError}</p>
+            <button
+              onClick={fetchDuplicates}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-medium hover:bg-blue-700"
+            >
+              Retry
+            </button>
+          </div>
+        ) : isLoading ? (
           <div className="bg-white rounded-lg shadow p-8 text-center text-gray-500">
             Loading duplicates...
           </div>

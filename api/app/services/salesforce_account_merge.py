@@ -126,10 +126,11 @@ class SalesforceAccountMergeService:
     async def update_account(self, account_id: str, properties: dict) -> dict:
         """Update an account's fields (applies blended winner values before merge).
 
-        Maps the blended Company-model keys to Salesforce Account field names. Only
-        writable standard fields are mapped; anything else (incl. domain, which has
-        no Account field, and the blender's metadata keys) is dropped so we never
-        send an unknown column (INVALID_FIELD).
+        Curated Company keys map to Account field names. Beyond those, raw fields the
+        reviewer picked in the all-fields comparison pass through by their Account API
+        name (the review UI gates them to UPDATEABLE fields). `skip` are model-only
+        keys with no Account column — domain (no Account field) and the blender's
+        metadata — so we never send an unknown column (INVALID_FIELD).
         """
         field_mapping = {
             "name": "Name",
@@ -138,12 +139,22 @@ class SalesforceAccountMergeService:
             "industry": "Industry",
             "country": "BillingCountry",
         }
+        skip = {"created_at", "updated_at", "association_count", "id", "domain"}
 
         sf_properties = {}
+        # 1) curated Company keys -> Account field names (exact snake match).
         for key, value in properties.items():
-            sf_key = field_mapping.get(key.lower())
-            if sf_key and value:
-                sf_properties[sf_key] = value
+            if key in field_mapping and value not in (None, ""):
+                sf_properties[field_mapping[key]] = value
+        # 2) raw picked fields (Account API names, e.g. "AnnualRevenue") pass through
+        # and OVERRIDE the curated default for the same field — step 2 runs after
+        # step 1, so it's order-independent. Skip the snake curated keys (handled
+        # above) and model-only keys with no Account column.
+        for key, value in properties.items():
+            if key in field_mapping or key in skip:
+                continue
+            if value not in (None, ""):
+                sf_properties[key] = value
 
         if not sf_properties:
             return {"success": True}

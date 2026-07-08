@@ -69,7 +69,8 @@ class SalesforceAccountsService:
             while next_url:
                 resp = await client.get(next_url, headers=self._headers())
                 if resp.status_code != 200:
-                    raise Exception(f"Failed to fetch accounts: {resp.text}")
+                    detail = (resp.text or "")[:250]
+                    raise Exception(f"Salesforce accounts fetch failed ({resp.status_code}): {detail}")
                 data = resp.json()
                 for rec in data.get("records", []):
                     rec.pop("attributes", None)
@@ -94,7 +95,8 @@ class SalesforceAccountsService:
             while next_url:
                 resp = await client.get(next_url, headers=self._headers())
                 if resp.status_code != 200:
-                    raise Exception(f"Failed to fetch accounts: {resp.text}")
+                    detail = (resp.text or "")[:250]
+                    raise Exception(f"Salesforce accounts fetch failed ({resp.status_code}): {detail}")
                 data = resp.json()
                 for rec in data.get("records", []):
                     rec.pop("attributes", None)

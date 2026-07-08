@@ -56,10 +56,10 @@ class HubSpotCompaniesService:
                 )
 
                 if response.status_code != 200:
-                    # Log the raw provider body server-side; the generic message is
-                    # what reaches scans.error_message (shown to tenant members).
+                    # Surface the provider status + detail in scans.error_message.
+                    detail = (response.text or "")[:250]
                     print(f"[hubspot] fetch companies failed ({response.status_code}): {response.text}")
-                    raise Exception("Failed to fetch HubSpot companies.")
+                    raise Exception(f"HubSpot companies fetch failed ({response.status_code}): {detail}")
 
                 data = response.json()
                 results = data.get("results", [])

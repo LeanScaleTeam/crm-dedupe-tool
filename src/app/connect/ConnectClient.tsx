@@ -36,6 +36,7 @@ export default function ConnectClient({ user, connections, oauthError, oauthSucc
   const router = useRouter()
   const [isLoading, setIsLoading] = useState(false)
   const [busyId, setBusyId] = useState<string | null>(null)
+  const [actionError, setActionError] = useState<string | null>(null)
   const [sfEnv, setSfEnv] = useState<SfEnv>('sandbox')
 
   const handleSalesforceConnect = async () => {
@@ -86,17 +87,23 @@ export default function ConnectClient({ user, connections, oauthError, oauthSucc
   const handleDisconnect = async (conn: CrmConnection) => {
     if (!confirm('Disconnect this org? Its stored tokens will be removed.')) return
     setBusyId(conn.id)
+    setActionError(null)
     try {
-      if (conn.crm_type === 'salesforce') {
-        await apiFetch(`/salesforce/connections/${conn.id}`, { method: 'DELETE' })
+      const path = conn.crm_type === 'salesforce'
+        ? `/salesforce/connections/${conn.id}`
+        : `/${conn.crm_type}/disconnect`
+      const response = await apiFetch(path, { method: 'DELETE' })
+      if (response.ok) {
+        router.refresh()
       } else {
-        await apiFetch(`/${conn.crm_type}/disconnect`, { method: 'DELETE' })
+        const data = await response.json().catch(() => ({}))
+        setActionError(data.detail || `Failed to disconnect (${response.status}).`)
       }
     } catch (error) {
-      console.error('Failed to disconnect:', error)
+      setActionError(error instanceof Error ? error.message : 'Failed to disconnect. Please try again.')
+    } finally {
+      setBusyId(null)
     }
-    setBusyId(null)
-    router.refresh()
   }
 
   const handleLogout = async () => {
@@ -126,6 +133,13 @@ export default function ConnectClient({ user, connections, oauthError, oauthSucc
             </button>
           </div>
         </div>
+
+        {/* Action error (disconnect, etc.) */}
+        {actionError && (
+          <div className="bg-red-50 border border-red-200 text-red-800 p-4 rounded-lg mb-6">
+            <p className="text-sm break-words">{actionError}</p>
+          </div>
+        )}
 
         {/* OAuth Feedback */}
         {oauthError && (

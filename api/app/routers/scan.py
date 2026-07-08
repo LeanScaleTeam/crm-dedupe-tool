@@ -583,29 +583,39 @@ async def get_editable_fields(
     scan_id: str,
     user_id: str = Depends(require_user),
 ):
-    """Writable properties for the scan's object type (HubSpot) so the review UI
-    can offer them as pick-to-merge fields. Read-only/calculated properties are
-    excluded — writing them would fail the pre-merge update. Returns
-    {"fields": [{name, label}]}."""
+    """Writable fields for the scan's object type so the review UI can offer them as
+    pick-to-merge fields. Read-only/formula/calculated fields are excluded (writing
+    them would fail the pre-merge update). Works for HubSpot (property catalog) and
+    Salesforce (SObject describe). Returns {"fields": [{name, label}]}."""
     supabase = get_supabase()
     scan = _assert_scan_access(supabase, scan_id, user_id)
 
-    hs_object = {"companies": "companies", "contacts": "contacts"}.get(scan.get("object_type"))
-    if not hs_object:
-        return {"fields": []}
-
+    object_type = scan.get("object_type")
     connection_id = scan.get("connection_id")
     conn_row = supabase.table("crm_connections").select("crm_type").eq(
         "id", connection_id
     ).single().execute()
-    if (conn_row.data or {}).get("crm_type") != "hubspot":
-        return {"fields": []}
+    crm_type = (conn_row.data or {}).get("crm_type")
 
-    connection, _, _ = await get_crm_services(user_id, connection_id, object_type=scan.get("object_type"))
-    from app.services.hubspot_properties import get_writable_properties
+    if crm_type == "hubspot":
+        hs_object = {"companies": "companies", "contacts": "contacts"}.get(object_type)
+        if not hs_object:
+            return {"fields": []}
+        connection, _, _ = await get_crm_services(user_id, connection_id, object_type=object_type)
+        from app.services.hubspot_properties import get_writable_properties
+        return {"fields": await get_writable_properties(connection.access_token, hs_object)}
 
-    fields = await get_writable_properties(connection.access_token, hs_object)
-    return {"fields": fields}
+    if crm_type == "salesforce":
+        sobject = {"contacts": "Contact", "accounts": "Account"}.get(object_type)
+        if not sobject:
+            return {"fields": []}
+        connection, _, _ = await get_crm_services(user_id, connection_id, object_type=object_type)
+        from app.services.salesforce_properties import get_writable_sf_fields
+        return {"fields": await get_writable_sf_fields(
+            connection.instance_url, connection.access_token, sobject
+        )}
+
+    return {"fields": []}
 
 
 @router.get("/{scan_id}/export")

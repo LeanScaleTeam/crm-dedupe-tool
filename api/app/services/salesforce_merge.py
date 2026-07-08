@@ -167,12 +167,12 @@ class SalesforceMergeService:
         Returns:
             Dict with update result
         """
-        # Map the blended FieldBlender keys (snake_case: first_name/last_name/
-        # job_title/email/phone) to Salesforce API field names. Only WRITABLE
-        # identity fields are mapped; anything NOT in this map is skipped, so we
-        # never send Salesforce an unknown column (INVALID_FIELD). That deliberately
-        # drops: company (-> AccountId needs a real Id, not a name) and the metadata
-        # fields the blender includes (created_at / updated_at / association_count).
+        # Curated FieldBlender keys (snake_case) map to Salesforce API field names.
+        # Beyond those, raw fields the reviewer picked in the all-fields comparison
+        # pass through by their SObject API name (the review UI gates them to
+        # UPDATEABLE fields). `skip` are model-only keys with no direct Contact
+        # column — company (-> AccountId needs an Id, not a name), full_name, and the
+        # blender's metadata — so we never send an unknown column (INVALID_FIELD).
         field_mapping = {
             "email": "Email",
             "first_name": "FirstName",
@@ -180,13 +180,22 @@ class SalesforceMergeService:
             "phone": "Phone",
             "job_title": "Title",
         }
+        skip = {"created_at", "updated_at", "association_count", "id", "company", "full_name"}
 
-        # Transform properties to Salesforce field names, dropping unmapped keys.
         sf_properties = {}
+        # 1) curated snake keys -> Salesforce field names (exact snake match).
         for key, value in properties.items():
-            sf_key = field_mapping.get(key.lower())
-            if sf_key and value:
-                sf_properties[sf_key] = value
+            if key in field_mapping and value not in (None, ""):
+                sf_properties[field_mapping[key]] = value
+        # 2) raw picked fields (SObject API names, e.g. "Email"/"Department") pass
+        # through and OVERRIDE the curated default for the same field — step 2 runs
+        # after step 1, so it's order-independent. Skip the snake curated keys
+        # (handled above) and model-only keys with no Contact column.
+        for key, value in properties.items():
+            if key in field_mapping or key in skip:
+                continue
+            if value not in (None, ""):
+                sf_properties[key] = value
 
         if not sf_properties:
             return {"success": True}  # Nothing to update

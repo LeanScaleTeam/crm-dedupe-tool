@@ -136,6 +136,7 @@ export default function DuplicateDetail({
 
   const [isSaving, setIsSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
+  const [saveError, setSaveError] = useState<string | null>(null)
 
   // Related records (associated contacts/deals/companies) fetched when the modal opens.
   const [related, setRelated] = useState<Record<string, Record<string, RelatedRecord[]>>>({})
@@ -204,6 +205,7 @@ export default function DuplicateDetail({
 
   const saveChanges = useCallback(async () => {
     setIsSaving(true)
+    setSaveError(null)
     try {
       const response = await apiFetch(
         `/scan/${scanId}/duplicate-sets/${duplicateSet.id}`,
@@ -219,9 +221,12 @@ export default function DuplicateDetail({
       if (response.ok) {
         setHasChanges(false)
         onPreviewUpdated?.(duplicateSet.id, mergedPreview)
+      } else {
+        const data = await response.json().catch(() => ({}))
+        setSaveError(data.detail || `Save failed (${response.status}).`)
       }
     } catch (error) {
-      console.error('Failed to save changes:', error)
+      setSaveError(error instanceof Error ? error.message : 'Save failed.')
     } finally {
       setIsSaving(false)
     }
@@ -514,7 +519,9 @@ export default function DuplicateDetail({
           {/* Footer */}
           <div className="sticky bottom-0 bg-white border-t px-6 py-4 flex justify-between items-center">
             <div className="text-sm text-gray-500">
-              {hasChanges && 'You have unsaved changes'}
+              {saveError ? (
+                <span className="text-red-600">{saveError}</span>
+              ) : hasChanges ? 'You have unsaved changes' : ''}
             </div>
             <div className="flex gap-3">
               <button onClick={onClose} className="px-4 py-2 text-gray-600 hover:text-gray-800">
@@ -553,7 +560,9 @@ function collectPropKeys(records: Contact[], exclude: Set<string>): string[] {
     for (const k of Object.keys(rp)) {
       if (exclude.has(k)) continue
       const v = rp[k]
-      if (v !== null && v !== undefined && v !== '') keys.add(k)
+      // Skip nested relationship/subquery values (e.g. Salesforce Account{},
+      // Opportunities{}) — they aren't flat, single-value fields.
+      if (v !== null && v !== undefined && v !== '' && typeof v !== 'object') keys.add(k)
     }
   }
   return Array.from(keys).sort()
@@ -562,7 +571,7 @@ function collectPropKeys(records: Contact[], exclude: Set<string>): string[] {
 /** A raw_properties value as a display string. */
 function rawVal(contact: Contact, key: string): string {
   const v = contact.raw_properties?.[key]
-  if (v === null || v === undefined) return ''
+  if (v === null || v === undefined || typeof v === 'object') return ''
   return String(v)
 }
 

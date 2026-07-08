@@ -81,6 +81,7 @@ export default function MergePage({ params }: MergePageProps) {
   }
 
   const downloadRestore = async () => {
+    setReportError(null)
     try {
       const response = await apiFetch(`/merge/${mergeId}/restore`)
       if (response.ok) {
@@ -93,9 +94,11 @@ export default function MergePage({ params }: MergePageProps) {
         a.click()
         a.remove()
         window.URL.revokeObjectURL(url)
+      } else {
+        setReportError(`Restore download failed (${response.status}).`)
       }
     } catch (error) {
-      console.error('Failed to download restore file:', error)
+      setReportError(error instanceof Error ? `Restore download failed: ${error.message}` : 'Restore download failed.')
     }
   }
 
@@ -172,7 +175,12 @@ export default function MergePage({ params }: MergePageProps) {
               </p>
               <ul className="text-sm text-red-800 space-y-1 max-h-32 overflow-y-auto">
                 {merge.error_log.slice(0, 5).map((err, idx) => (
-                  <li key={idx}>{err.error}</li>
+                  <li key={idx}>
+                    {err.set_id && err.set_id !== 'system' && (
+                      <span className="font-mono text-red-600">Set {err.set_id.slice(0, 8)}: </span>
+                    )}
+                    {err.error}
+                  </li>
                 ))}
                 {merge.error_log.length > 5 && (
                   <li className="text-red-600">

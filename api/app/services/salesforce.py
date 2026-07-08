@@ -222,9 +222,10 @@ class SalesforceService:
                     access_token=new_tokens.access_token,
                     refresh_token=new_tokens.refresh_token,
                 )
-            except Exception:
-                # If refresh fails, return existing (might still work)
-                pass
+            except Exception as e:
+                # Log the refresh failure (don't swallow silently) and fall through to
+                # the stored token; a downstream 401 then surfaces as a clear error.
+                print(f"[salesforce] token refresh failed for user {user_id}: {e}")
 
         # Decrypt and return existing
         return SalesforceConnection(
@@ -255,6 +256,28 @@ class SalesforceService:
         else:
             org_id = conn.get("org_id") or portal_data
             instance_url = "https://login.salesforce.com"
+
+        # Refresh proactively (1-hour buffer), mirroring get_connection, so the by-id
+        # path (scans / merges / field describe) never acts on a stale token.
+        expires_at = parse_iso(conn["expires_at"])
+        if expires_at < datetime.now(timezone.utc) + timedelta(hours=1):
+            try:
+                new_tokens = await self.refresh_tokens(
+                    decrypt_token(conn["refresh_token_encrypted"])
+                )
+                await self.save_connection(conn["user_id"], new_tokens, org_id)
+                return SalesforceConnection(
+                    id=conn["id"],
+                    user_id=conn["user_id"],
+                    org_id=org_id,
+                    instance_url=new_tokens.instance_url,
+                    access_token=new_tokens.access_token,
+                    refresh_token=new_tokens.refresh_token,
+                )
+            except Exception as e:
+                # Log the refresh failure (don't swallow silently) and fall through to
+                # the stored token; a downstream 401 then surfaces as a clear error.
+                print(f"[salesforce] token refresh failed for connection {connection_id}: {e}")
 
         return SalesforceConnection(
             id=conn["id"],
