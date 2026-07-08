@@ -511,15 +511,16 @@ export default function DuplicateDetail({
                 >
                   {allContacts.map((rec, idx) => {
                     const rel: Record<string, RelatedRecord[]> = (rec.id ? related[rec.id] : undefined) || {}
-                    const isExcluded = idx > 0 && !!rec.id && excludedIds.has(rec.id)
+                    const isWinnerCol = !!rec.id && rec.id === winnerId
+                    const isExcluded = !isWinnerCol && !!rec.id && excludedIds.has(rec.id)
                     const groups = Object.entries(rel).filter(([, items]) => items && items.length > 0)
                     return (
                       <div
                         key={idx}
-                        className={`border rounded-lg p-3 ${idx === 0 ? 'border-green-200 bg-green-50/40' : 'border-gray-200'} ${isExcluded ? 'opacity-40' : ''}`}
+                        className={`border rounded-lg p-3 ${isWinnerCol ? 'border-green-200 bg-green-50/40' : 'border-gray-200'} ${isExcluded ? 'opacity-40' : ''}`}
                       >
                         <p className="text-xs font-semibold text-gray-700 mb-2 truncate">
-                          {idx === 0 ? '★ ' : ''}{getContactName(rec)}
+                          {isWinnerCol ? '★ ' : ''}{getContactName(rec)}
                         </p>
                         {groups.length === 0 ? (
                           <p className="text-xs text-gray-400">No related records</p>
