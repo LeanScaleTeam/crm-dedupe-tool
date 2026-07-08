@@ -132,11 +132,12 @@ class HubSpotContactsService:
         return count
 
     async def get_total_contacts(self) -> int:
-        """Get total count of contacts (for progress calculation)."""
+        """Total contact count (for progress). The v3 LIST endpoint doesn't return a
+        total, so use the SEARCH endpoint (empty filter = all records)."""
         async with httpx.AsyncClient() as client:
-            response = await client.get(
-                f"{self.BASE_URL}/crm/v3/objects/contacts",
-                params={"limit": 1},
+            response = await client.post(
+                f"{self.BASE_URL}/crm/v3/objects/contacts/search",
+                json={"limit": 1},
                 headers={
                     "Authorization": f"Bearer {self.access_token}",
                     "Content-Type": "application/json",
@@ -146,5 +147,4 @@ class HubSpotContactsService:
             if response.status_code != 200:
                 return 0
 
-            data = response.json()
-            return data.get("total", 0)
+            return response.json().get("total", 0)

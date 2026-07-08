@@ -114,8 +114,10 @@ export default function DuplicateDetail({
   )
   const winnerRebasedRef = useRef(false)
   const winner = allRecords.find(r => r.id === winnerId) ?? duplicateSet.winner_data
+  // Records stay in their ORIGINAL columns; the winner is highlighted IN PLACE
+  // (not moved to the front). Losers = everything that isn't the winner.
   const losers = allRecords.filter(r => r.id !== winner.id)
-  const allContacts = [winner, ...losers]
+  const allContacts = allRecords
   // Contacts and companies expose different editable fields; pick by record shape.
   const EDITABLE_FIELDS = isCompanyRecord(winner) ? COMPANY_EDITABLE_FIELDS : CONTACT_EDITABLE_FIELDS
   // Every other populated property (from raw_properties), shown read-only for context.
@@ -303,52 +305,58 @@ export default function DuplicateDetail({
           </div>
 
           {/* Content */}
-          <div className="p-6 overflow-y-auto flex-1 min-h-0">
+          <div className="p-6 overflow-auto flex-1 min-h-0">
             {/* Instructions */}
             <div className="mb-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-800">
               Click any field value to use it in the merged result. Use <strong>Not a duplicate</strong> on a
               record to exclude it from the merge (it stays untouched).
             </div>
 
-            {/* Comparison Table */}
-            <div className="overflow-x-auto">
+            {/* Comparison Table — content area scrolls both ways so the horizontal
+                scrollbar stays pinned at the visible bottom (not the table's bottom). */}
+            <div className="min-w-max">
               <table className="w-full">
                 <thead>
                   <tr className="border-b">
                     <th className="text-left py-3 px-4 text-sm font-medium text-gray-500 w-28">
                       Field
                     </th>
-                    <th className="text-left py-3 px-4 text-sm font-medium text-green-700 bg-green-50">
-                      <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 bg-green-500 text-white rounded-full flex items-center justify-center text-xs font-bold">W</span>
-                        {getContactName(winner)}
-                        <span className="text-xs text-green-500">(Winner)</span>
-                      </div>
-                      <div className="mt-1 text-xs font-normal text-gray-400">ID {winner.id}</div>
-                    </th>
-                    {losers.map((loser, idx) => {
-                      const isExcluded = !!(loser.id && excludedIds.has(loser.id))
+                    {allContacts.map((rec, idx) => {
+                      const isWinnerCol = !!rec.id && rec.id === winnerId
+                      const isExcluded = !isWinnerCol && !!rec.id && excludedIds.has(rec.id)
                       return (
-                        <th key={idx} className={`text-left py-3 px-4 text-sm font-medium bg-gray-50 ${isExcluded ? 'opacity-50' : 'text-gray-600'}`}>
+                        <th
+                          key={rec.id ?? idx}
+                          className={`text-left py-3 px-4 text-sm font-medium ${
+                            isWinnerCol
+                              ? 'text-green-700 bg-green-50'
+                              : `bg-gray-50 ${isExcluded ? 'opacity-50' : 'text-gray-600'}`
+                          }`}
+                        >
                           <div className="flex items-center gap-2">
-                            <span className="w-6 h-6 bg-gray-400 text-white rounded-full flex items-center justify-center text-xs font-bold">L</span>
-                            <span className={isExcluded ? 'line-through text-gray-500' : ''}>{getContactName(loser)}</span>
+                            <span className={`w-6 h-6 ${isWinnerCol ? 'bg-green-500' : 'bg-gray-400'} text-white rounded-full flex items-center justify-center text-xs font-bold`}>
+                              {isWinnerCol ? 'W' : 'L'}
+                            </span>
+                            <span className={isExcluded ? 'line-through text-gray-500' : ''}>{getContactName(rec)}</span>
+                            {isWinnerCol && <span className="text-xs text-green-500">(Winner)</span>}
                           </div>
-                          <div className="mt-0.5 text-xs font-normal text-gray-400">ID {loser.id}</div>
-                          <div className="mt-1 flex items-center gap-3">
-                            <button
-                              onClick={() => makeWinner(loser.id)}
-                              className="text-xs font-medium text-green-600 hover:text-green-700"
-                            >
-                              ★ Make winner
-                            </button>
-                            <button
-                              onClick={() => toggleExcluded(loser.id)}
-                              className={`text-xs font-medium ${isExcluded ? 'text-blue-600 hover:text-blue-700' : 'text-red-500 hover:text-red-600'}`}
-                            >
-                              {isExcluded ? '↺ Include' : '✕ Not a duplicate'}
-                            </button>
-                          </div>
+                          <div className="mt-0.5 text-xs font-normal text-gray-400">ID {rec.id}</div>
+                          {!isWinnerCol && (
+                            <div className="mt-1 flex items-center gap-3">
+                              <button
+                                onClick={() => makeWinner(rec.id)}
+                                className="text-xs font-medium text-green-600 hover:text-green-700"
+                              >
+                                ★ Make winner
+                              </button>
+                              <button
+                                onClick={() => toggleExcluded(rec.id)}
+                                className={`text-xs font-medium ${isExcluded ? 'text-blue-600 hover:text-blue-700' : 'text-red-500 hover:text-red-600'}`}
+                              >
+                                {isExcluded ? '↺ Include' : '✕ Not a duplicate'}
+                              </button>
+                            </div>
+                          )}
                         </th>
                       )
                     })}
@@ -371,12 +379,13 @@ export default function DuplicateDetail({
                           const val = getFieldValue(contact, key)
                           const isSelected = val && val === mergedVal
                           const isEmpty = !val
-                          const colExcluded = idx > 0 && !!contact.id && excludedIds.has(contact.id)
+                          const isWinnerCol = !!contact.id && contact.id === winnerId
+                          const colExcluded = !isWinnerCol && !!contact.id && excludedIds.has(contact.id)
                           return (
                             <td
                               key={idx}
                               className={`py-3 px-4 text-sm transition-colors ${
-                                idx === 0 ? 'bg-green-50' : 'bg-gray-50'
+                                isWinnerCol ? 'bg-green-50' : 'bg-gray-50'
                               } ${colExcluded ? 'opacity-40 cursor-not-allowed line-through' : 'cursor-pointer'} ${
                                 isSelected && !colExcluded
                                   ? 'ring-2 ring-inset ring-blue-500 font-medium text-blue-900'
@@ -417,9 +426,10 @@ export default function DuplicateDetail({
                       {allContacts.map((contact, idx) => {
                         const raw = getFieldValue(contact, key)
                         const display = format === 'date' ? formatDate(raw) : (raw || '-')
-                        const colExcluded = idx > 0 && !!contact.id && excludedIds.has(contact.id)
+                        const isWinnerCol = !!contact.id && contact.id === winnerId
+                        const colExcluded = !isWinnerCol && !!contact.id && excludedIds.has(contact.id)
                         return (
-                          <td key={idx} className={`py-3 px-4 text-sm text-gray-600 ${idx === 0 ? 'bg-green-50' : 'bg-gray-50'} ${colExcluded ? 'opacity-40 line-through' : ''}`}>
+                          <td key={idx} className={`py-3 px-4 text-sm text-gray-600 ${isWinnerCol ? 'bg-green-50' : 'bg-gray-50'} ${colExcluded ? 'opacity-40 line-through' : ''}`}>
                             {display}
                           </td>
                         )
@@ -459,7 +469,8 @@ export default function DuplicateDetail({
                         </td>
                         {allContacts.map((contact, idx) => {
                           const val = rawVal(contact, key)
-                          const colExcluded = idx > 0 && !!contact.id && excludedIds.has(contact.id)
+                          const isWinnerCol = !!contact.id && contact.id === winnerId
+                          const colExcluded = !isWinnerCol && !!contact.id && excludedIds.has(contact.id)
                           const isSelected = writable && !!val && val === mergedDisplay
                           const pickable = writable && !!val && !colExcluded
                           return (
@@ -467,7 +478,7 @@ export default function DuplicateDetail({
                               key={idx}
                               onClick={() => { if (pickable) pickFieldValue(key, val) }}
                               title={pickable ? 'Click to use this value' : ''}
-                              className={`py-2 px-4 text-xs break-all ${idx === 0 ? 'bg-green-50' : 'bg-gray-50'} ${colExcluded ? 'opacity-40 line-through' : ''} ${
+                              className={`py-2 px-4 text-xs break-all ${isWinnerCol ? 'bg-green-50' : 'bg-gray-50'} ${colExcluded ? 'opacity-40 line-through' : ''} ${
                                 isSelected && !colExcluded
                                   ? 'ring-2 ring-inset ring-blue-500 font-medium text-blue-900'
                                   : val ? 'text-gray-700' : 'text-gray-300'
