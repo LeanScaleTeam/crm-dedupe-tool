@@ -606,3 +606,31 @@ async def get_editable_fields(
 
     fields = await get_writable_properties(connection.access_token, hs_object)
     return {"fields": fields}
+
+
+@router.get("/{scan_id}/export")
+async def export_scan_matches(scan_id: str, user_id: str = Depends(require_user)):
+    """Export all duplicate MATCHES for a scan as an Excel workbook — one row per
+    record, with record IDs and deep links into the CRM. Works for any scan,
+    including view-only (dry-run) account scans that can't be merged."""
+    from fastapi.responses import Response
+    from app.services.matches_export import build_matches_xlsx
+
+    supabase = get_supabase()
+    scan = _assert_scan_access(supabase, scan_id, user_id)
+
+    conn_row = supabase.table("crm_connections").select("crm_type,portal_id").eq(
+        "id", scan.get("connection_id")
+    ).single().execute()
+    connection = conn_row.data or {}
+
+    sets = supabase.table("duplicate_sets").select("*").eq(
+        "scan_id", scan_id
+    ).order("confidence", desc=True).execute()
+
+    xlsx = build_matches_xlsx(scan, connection, sets.data or [])
+    return Response(
+        content=xlsx,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename=matches-{scan_id[:8]}.xlsx"},
+    )

@@ -80,6 +80,25 @@ export default function MergePage({ params }: MergePageProps) {
     }
   }
 
+  const downloadRestore = async () => {
+    try {
+      const response = await apiFetch(`/merge/${mergeId}/restore`)
+      if (response.ok) {
+        const blob = await response.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `restore-${mergeId.slice(0, 8)}.csv`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        window.URL.revokeObjectURL(url)
+      }
+    } catch (error) {
+      console.error('Failed to download restore file:', error)
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gray-50 flex items-center justify-center">
       <div className="max-w-lg w-full mx-4">
@@ -174,6 +193,17 @@ export default function MergePage({ params }: MergePageProps) {
                 View Reports
               </button>
               <button
+                onClick={downloadRestore}
+                className="w-full py-3 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50"
+              >
+                Download restore file (undo CSV)
+              </button>
+              <p className="text-xs text-gray-400 -mt-1 text-left">
+                CSV of the merged-away records, ready to re-import if this was a mistake
+                (Salesforce Data Loader &ldquo;Insert&rdquo; / HubSpot &ldquo;Import&rdquo;).
+                Note: re-imported records get new IDs and don&apos;t restore moved relationships.
+              </p>
+              <button
                 onClick={async () => {
                   setIsGeneratingReport(true)
                   setReportError(null)
@@ -212,12 +242,21 @@ export default function MergePage({ params }: MergePageProps) {
           )}
 
           {merge?.status === 'failed' && (
-            <button
-              onClick={() => router.push('/scan')}
-              className="w-full py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700"
-            >
-              Try Again
-            </button>
+            <div className="space-y-3">
+              {/* A partial merge may have already deleted some records — offer restore. */}
+              <button
+                onClick={downloadRestore}
+                className="w-full py-3 border border-gray-300 text-gray-700 rounded-lg font-medium hover:bg-gray-50"
+              >
+                Download restore file (undo CSV)
+              </button>
+              <button
+                onClick={() => router.push('/scan')}
+                className="w-full py-3 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700"
+              >
+                Try Again
+              </button>
+            </div>
           )}
         </div>
 

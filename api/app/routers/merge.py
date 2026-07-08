@@ -352,6 +352,34 @@ async def get_merge_status(merge_id: str, user_id: str = Depends(require_user)):
     }
 
 
+@router.get("/{merge_id}/restore")
+async def download_merge_restore(merge_id: str, user_id: str = Depends(require_user)):
+    """Download a CRM-native CSV of the records deleted by this merge (the losers),
+    ready to re-import if the merge was a mistake — Salesforce Data Loader 'Insert'
+    or HubSpot 'Import -> Create records'. Restores record DATA, not the pre-merge
+    graph (new ids; re-parented relationships stay on the winner)."""
+    from fastapi.responses import Response
+    from app.services.restore_export import build_restore_csv
+
+    supabase = get_supabase()
+    _assert_merge_access(supabase, merge_id, user_id)
+
+    backups = supabase.table("merge_backups").select(
+        "crm_type,loser_snapshot"
+    ).eq("merge_id", merge_id).execute()
+    rows = backups.data or []
+
+    crm_type = next((r.get("crm_type") for r in rows if r.get("crm_type")), None) or "salesforce"
+    losers = [l for r in rows for l in (r.get("loser_snapshot") or []) if l]
+
+    csv_bytes = build_restore_csv(crm_type, losers)
+    return Response(
+        content=csv_bytes,
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename=restore-{crm_type}-{merge_id[:8]}.csv"},
+    )
+
+
 @router.post("/{merge_id}/pause")
 async def pause_merge(merge_id: str, user_id: str = Depends(require_user)):
     """Pause an in-progress merge."""

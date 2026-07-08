@@ -166,6 +166,25 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
     }
   }
 
+  const downloadMatches = async () => {
+    try {
+      const response = await apiFetch(`/scan/${scan.id}/export`)
+      if (response.ok) {
+        const blob = await response.blob()
+        const url = window.URL.createObjectURL(blob)
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `matches-${scan.id.slice(0, 8)}.xlsx`
+        document.body.appendChild(a)
+        a.click()
+        a.remove()
+        window.URL.revokeObjectURL(url)
+      }
+    } catch (error) {
+      console.error('Failed to export matches:', error)
+    }
+  }
+
   const getFilteredSets = () => {
     return duplicateSets.filter(set => {
       if (confidenceFilter === 'all') return true
@@ -247,6 +266,14 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
           {mergeError && (
             <div className="text-sm text-red-600 mr-2">{mergeError}</div>
           )}
+
+          {/* Export matches (works for any scan, incl. view-only) */}
+          <button
+            onClick={downloadMatches}
+            className="px-4 py-2 border border-gray-300 text-gray-700 rounded-lg text-sm font-medium hover:bg-gray-50"
+          >
+            Export matches (Excel)
+          </button>
 
           {/* Merge Button — disabled for view-only (dry-run) scans */}
           {scan.config?.dry_run ? (
