@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useCallback, useEffect } from 'react'
+import { useState, useCallback, useEffect, useRef } from 'react'
 import { apiFetch } from '@/lib/api'
 
 // Represents one CRM record in a duplicate set. Covers BOTH contacts and
@@ -112,6 +112,7 @@ export default function DuplicateDetail({
   const [winnerId, setWinnerId] = useState<string | undefined>(
     duplicateSet.winner_record_id ?? duplicateSet.winner_data?.id
   )
+  const winnerRebasedRef = useRef(false)
   const winner = allRecords.find(r => r.id === winnerId) ?? duplicateSet.winner_data
   const losers = allRecords.filter(r => r.id !== winner.id)
   const allContacts = [winner, ...losers]
@@ -220,6 +221,24 @@ export default function DuplicateDetail({
     setHasChanges(true)
   }, [])
 
+  // When the winner changes, re-base the merged result on the NEW winner's values
+  // (skip the initial mount so the loaded/saved preview is preserved on open).
+  useEffect(() => {
+    if (!winnerRebasedRef.current) {
+      winnerRebasedRef.current = true
+      return
+    }
+    setMergedPreview(prev => {
+      const next: Record<string, unknown> = { ...prev }
+      for (const { key } of EDITABLE_FIELDS) next[key] = getFieldValue(winner, key) || ''
+      next.created_at = winner.created_at
+      next.updated_at = winner.updated_at
+      next.association_count = winner.association_count
+      return next
+    })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [winnerId])
+
   const excludedCount = losers.filter(l => l.id && excludedIds.has(l.id)).length
   const mergingCount = allContacts.length - excludedCount // winner + kept losers
 
@@ -305,6 +324,7 @@ export default function DuplicateDetail({
                         {getContactName(winner)}
                         <span className="text-xs text-green-500">(Winner)</span>
                       </div>
+                      <div className="mt-1 text-xs font-normal text-gray-400">ID {winner.id}</div>
                     </th>
                     {losers.map((loser, idx) => {
                       const isExcluded = !!(loser.id && excludedIds.has(loser.id))
@@ -314,6 +334,7 @@ export default function DuplicateDetail({
                             <span className="w-6 h-6 bg-gray-400 text-white rounded-full flex items-center justify-center text-xs font-bold">L</span>
                             <span className={isExcluded ? 'line-through text-gray-500' : ''}>{getContactName(loser)}</span>
                           </div>
+                          <div className="mt-0.5 text-xs font-normal text-gray-400">ID {loser.id}</div>
                           <div className="mt-1 flex items-center gap-3">
                             <button
                               onClick={() => makeWinner(loser.id)}
