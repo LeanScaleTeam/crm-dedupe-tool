@@ -49,7 +49,7 @@ interface DuplicateDetailProps {
   duplicateSet: DuplicateSet
   scanId: string
   onClose: () => void
-  onPreviewUpdated?: (setId: string, preview: Record<string, unknown>) => void
+  onPreviewUpdated?: (setId: string, updated: Record<string, unknown>) => void
 }
 
 // Records may be contacts OR companies — fall back to the company name.
@@ -261,8 +261,11 @@ export default function DuplicateDetail({
         }
       )
       if (response.ok) {
+        // Hand the saved row back so the parent's copy (winner, losers, preview)
+        // stays in sync — otherwise reopening the set reverts to the old winner.
+        const updated = await response.json().catch(() => null)
         setHasChanges(false)
-        onPreviewUpdated?.(duplicateSet.id, mergedPreview)
+        onPreviewUpdated?.(duplicateSet.id, updated ?? { merged_preview: mergedPreview })
       } else {
         const data = await response.json().catch(() => ({}))
         setSaveError(data.detail || `Save failed (${response.status}).`)

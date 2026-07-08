@@ -362,11 +362,19 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
             duplicateSet={expandedSet}
             scanId={scan.id}
             onClose={() => setExpandedSet(null)}
-            onPreviewUpdated={(setId, preview) => {
+            onPreviewUpdated={(setId, updated) => {
+              // Merge the full saved row (winner_record_id / winner_data / loser_data
+              // / merged_preview / …) into the background list so reopening reflects
+              // the new winner. Keep the OPEN modal's structure stable (only its
+              // preview) to avoid a jarring column reorder mid-session.
               setDuplicateSets(prev =>
-                prev.map(s => s.id === setId ? { ...s, merged_preview: preview } : s)
+                prev.map(s => s.id === setId ? { ...s, ...(updated as Partial<DuplicateSet>) } : s)
               )
-              setExpandedSet(prev => prev ? { ...prev, merged_preview: preview } : null)
+              setExpandedSet(prev =>
+                prev
+                  ? { ...prev, merged_preview: (updated.merged_preview as Record<string, unknown>) ?? prev.merged_preview }
+                  : null
+              )
             }}
           />
         )}
