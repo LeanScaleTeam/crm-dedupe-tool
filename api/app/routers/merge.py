@@ -59,16 +59,18 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
             "started_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", merge_id).execute()
 
-        # Get scan to find connection + tenant (tenant_id stamps the pre-merge backup).
-        scan_result = supabase.table("scans").select("connection_id,tenant_id").eq(
-            "id", scan_id
-        ).single().execute()
+        # Get scan to find connection + tenant + object type (tenant_id stamps the
+        # pre-merge backup; object_type routes to the correct merge service).
+        scan_result = supabase.table("scans").select(
+            "connection_id,tenant_id,object_type"
+        ).eq("id", scan_id).single().execute()
 
         if not scan_result.data:
             raise Exception("Scan not found")
 
         connection_id = scan_result.data["connection_id"]
         tenant_id = scan_result.data.get("tenant_id")
+        object_type = scan_result.data.get("object_type") or "contacts"
 
         # crm_type is recorded on each backup row for the restore path.
         conn_row = supabase.table("crm_connections").select("crm_type").eq(
@@ -76,8 +78,12 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
         ).single().execute()
         crm_type = (conn_row.data or {}).get("crm_type")
 
-        # Get CRM services based on connection type
-        _, _, merge_service = await get_crm_services(user_id, connection_id)
+        # Get CRM services for the scan's object type. Passing object_type is the
+        # critical guard: a companies merge uses the companies merge service, never
+        # the contacts endpoint (which would merge the wrong records).
+        _, _, merge_service = await get_crm_services(
+            user_id, connection_id, object_type=object_type
+        )
 
         # Get duplicate sets to merge — re-assert the approval gate here (defence
         # in depth: never merge a set that isn't approved, even if its id was

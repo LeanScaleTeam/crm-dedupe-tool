@@ -4,7 +4,9 @@ from typing import Tuple, Any
 from app.services.supabase_client import get_supabase
 
 
-async def get_crm_services(user_id: str, connection_id: str) -> Tuple[Any, Any, Any]:
+async def get_crm_services(
+    user_id: str, connection_id: str, object_type: str = "contacts"
+) -> Tuple[Any, Any, Any]:
     """
     Get the appropriate CRM services based on connection type.
 
@@ -31,23 +33,41 @@ async def get_crm_services(user_id: str, connection_id: str) -> Tuple[Any, Any, 
 
     if crm_type == "hubspot":
         from app.services.hubspot import HubSpotService
-        from app.services.hubspot_contacts import HubSpotContactsService
-        from app.services.hubspot_merge import HubSpotMergeService
 
         service = HubSpotService()
-        connection = await service.get_connection(owner_id)
+        # Multi-org: resolve the SPECIFIC connection (by id), not the owner's single
+        # HubSpot connection, so scans/merges use the right portal's token.
+        connection = await service.get_connection_by_id(connection_id)
         if not connection:
             raise Exception("HubSpot connection not found or expired")
 
-        contacts_service = HubSpotContactsService(connection)
-        merge_service = HubSpotMergeService(connection)
+        # object_type selects the fetch + merge services. A companies scan must
+        # NEVER fall through to the contacts merge endpoint (that would merge the
+        # wrong records) — unsupported types raise instead of defaulting to contacts.
+        if object_type == "companies":
+            from app.services.hubspot_companies import HubSpotCompaniesService
+            from app.services.hubspot_company_merge import HubSpotCompanyMergeService
 
-        return connection, contacts_service, merge_service
+            return (
+                connection,
+                HubSpotCompaniesService(connection),
+                HubSpotCompanyMergeService(connection),
+            )
+
+        if object_type != "contacts":
+            raise Exception(f"HubSpot object type '{object_type}' is not supported yet.")
+
+        from app.services.hubspot_contacts import HubSpotContactsService
+        from app.services.hubspot_merge import HubSpotMergeService
+
+        return (
+            connection,
+            HubSpotContactsService(connection),
+            HubSpotMergeService(connection),
+        )
 
     elif crm_type == "salesforce":
         from app.services.salesforce import SalesforceService
-        from app.services.salesforce_contacts import SalesforceContactsService
-        from app.services.salesforce_merge import SalesforceMergeService
 
         service = SalesforceService()
         # Multi-org: resolve the SPECIFIC connection (by id), not the owner's single
@@ -56,10 +76,21 @@ async def get_crm_services(user_id: str, connection_id: str) -> Tuple[Any, Any, 
         if not connection:
             raise Exception("Salesforce connection not found or expired")
 
-        contacts_service = SalesforceContactsService(connection)
-        merge_service = SalesforceMergeService(connection)
+        # Contacts are the only Salesforce real-merge path. Accounts run as a
+        # view-only dry-run BEFORE this factory (no merge service), so the default
+        # 'contacts' request from that path is harmless. Any other object must raise,
+        # never fall through to the contact merge (wrong-record deletion).
+        if object_type not in ("contacts", "accounts"):
+            raise Exception(f"Salesforce object type '{object_type}' is not supported yet.")
 
-        return connection, contacts_service, merge_service
+        from app.services.salesforce_contacts import SalesforceContactsService
+        from app.services.salesforce_merge import SalesforceMergeService
+
+        return (
+            connection,
+            SalesforceContactsService(connection),
+            SalesforceMergeService(connection),
+        )
 
     else:
         raise Exception(f"Unsupported CRM type: {crm_type}")

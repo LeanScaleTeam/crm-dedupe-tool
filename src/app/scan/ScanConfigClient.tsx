@@ -25,12 +25,24 @@ interface WinnerRule {
   customValue?: string
 }
 
-const OBJECT_TYPES: { value: ObjectType; label: string; description: string; available: boolean }[] = [
-  { value: 'contacts', label: 'Contacts', description: 'People records in your CRM', available: true },
-  { value: 'accounts', label: 'Accounts', description: 'Organization records — config-driven match, view-only (dry-run)', available: true },
-  { value: 'companies', label: 'Companies', description: 'Organization records', available: false },
-  { value: 'deals', label: 'Deals', description: 'Sales pipeline records', available: false },
-]
+// Object types are CRM-specific: HubSpot shows only Contacts + Companies (both
+// real-merge). Salesforce shows Contacts + Accounts (config-driven dry-run), with
+// Deals coming soon.
+const objectTypesForCrm = (
+  crmType: string,
+): { value: ObjectType; label: string; description: string; available: boolean }[] => {
+  if (crmType === 'hubspot') {
+    return [
+      { value: 'contacts', label: 'Contacts', description: 'People records in your CRM', available: true },
+      { value: 'companies', label: 'Companies', description: 'Organization records — matched & merged by domain and name', available: true },
+    ]
+  }
+  return [
+    { value: 'contacts', label: 'Contacts', description: 'People records in your CRM', available: true },
+    { value: 'accounts', label: 'Accounts', description: 'Organization records — config-driven match, view-only (dry-run)', available: true },
+    { value: 'deals', label: 'Deals', description: 'Sales pipeline records', available: false },
+  ]
+}
 
 const ACCOUNT_PROFILES: { value: string; label: string }[] = [
   { value: 'scandit/account_v3', label: 'Scandit — Name + Domain + Country, Vertical discriminator (V3)' },
@@ -47,6 +59,7 @@ const WINNER_RULES: { value: WinnerRuleType; label: string; description: string 
 
 export default function ScanConfigClient({ connection }: ScanConfigClientProps) {
   const router = useRouter()
+  const objectTypes = objectTypesForCrm(connection.crm_type)
   const [objectType, setObjectType] = useState<ObjectType>('contacts')
   const [matchProfile, setMatchProfile] = useState<string>('scandit/account_v3')
   const [winnerRules, setWinnerRules] = useState<WinnerRule[]>([
@@ -132,7 +145,7 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
               1. Select Object Type
             </h2>
             <div className="grid gap-3">
-              {OBJECT_TYPES.map((type) => (
+              {objectTypes.map((type) => (
                 <label
                   key={type.value}
                   className={`flex items-center p-4 border-2 rounded-lg cursor-pointer transition-colors ${
@@ -292,7 +305,7 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
             <h3 className="font-medium text-yellow-900 mb-2">What happens next?</h3>
             <ul className="text-sm text-yellow-800 space-y-1 list-disc list-inside">
               <li>We&apos;ll fetch all {objectType} from your CRM</li>
-              <li>Duplicates will be detected using fuzzy matching on names and emails</li>
+              <li>Duplicates will be detected using fuzzy matching on {objectType === 'companies' ? 'company name and web domain' : 'names and emails'}</li>
               <li>You&apos;ll review each duplicate set before any changes are made</li>
               <li>This process is safe - no data is modified until you approve</li>
             </ul>

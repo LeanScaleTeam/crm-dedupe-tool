@@ -125,23 +125,33 @@ class HubSpotService:
         encrypted_access = encrypt_token(tokens.access_token)
         encrypted_refresh = encrypt_token(tokens.refresh_token)
 
+        # For HubSpot the portal (hub) id IS the org identifier for multi-org keying.
+        org_id = portal_id
+
         # Resolve the tenant BEFORE the upsert (crm_connections.tenant_id is NOT
         # NULL). tenant = connected org: reuse this user's existing hubspot tenant
-        # or create a fresh one (client access off) with the user as owner.
-        tenant_id = resolve_tenant_for_save(self.supabase, user_id, "hubspot", portal_id)
+        # for THIS portal, or create a fresh one (client access off) with the user
+        # as owner. A different portal gets its own tenant.
+        tenant_id = resolve_tenant_for_save(
+            self.supabase, user_id, "hubspot", portal_id, org_id=org_id
+        )
 
-        # Upsert connection
+        # Multi-org: one row per (user, crm_type, org). Re-connecting the same portal
+        # updates in place; a new portal adds a row. Migration 006 replaced the old
+        # UNIQUE(user_id, crm_type) with UNIQUE(user_id, crm_type, org_id), so the
+        # upsert MUST conflict on org_id too (else Postgres 42P10).
         result = self.supabase.table("crm_connections").upsert(
             {
                 "user_id": user_id,
                 "tenant_id": tenant_id,
                 "crm_type": "hubspot",
+                "org_id": org_id,
                 "access_token_encrypted": encrypted_access,
                 "refresh_token_encrypted": encrypted_refresh,
                 "portal_id": portal_id,
                 "expires_at": expires_at.isoformat(),
             },
-            on_conflict="user_id,crm_type",
+            on_conflict="user_id,crm_type,org_id",
         ).execute()
 
         return result.data[0] if result.data else None
@@ -176,6 +186,48 @@ class HubSpotService:
             )
 
         # Decrypt and return existing
+        return HubSpotConnection(
+            id=conn["id"],
+            user_id=conn["user_id"],
+            portal_id=conn["portal_id"],
+            access_token=decrypt_token(conn["access_token_encrypted"]),
+            refresh_token=decrypt_token(conn["refresh_token_encrypted"]),
+            expires_at=expires_at,
+        )
+
+    async def get_connection_by_id(self, connection_id: str) -> Optional[HubSpotConnection]:
+        """Get ONE specific HubSpot connection by its row id (multi-org).
+
+        Unlike get_connection (which resolves the user's single HubSpot connection),
+        this targets an exact connected portal so scans/merges act on the right
+        token. Refreshes proactively (5-min buffer), mirroring get_connection.
+        """
+        result = self.supabase.table("crm_connections").select("*").eq(
+            "id", connection_id
+        ).single().execute()
+        conn = result.data
+        if not conn:
+            return None
+
+        # parse_iso tolerates Postgres's trailing-zero-trimmed microseconds.
+        expires_at = parse_iso(conn["expires_at"])
+
+        # Check if token needs refresh (5 min buffer)
+        if expires_at < datetime.now(timezone.utc) + timedelta(minutes=5):
+            refresh_token = decrypt_token(conn["refresh_token_encrypted"])
+            new_tokens = await self.refresh_tokens(refresh_token)
+            # save keys on (user_id, crm_type, org_id=portal_id) → updates this row.
+            await self.save_connection(conn["user_id"], new_tokens, conn["portal_id"])
+
+            return HubSpotConnection(
+                id=conn["id"],
+                user_id=conn["user_id"],
+                portal_id=conn["portal_id"],
+                access_token=new_tokens.access_token,
+                refresh_token=new_tokens.refresh_token,
+                expires_at=datetime.now(timezone.utc) + timedelta(seconds=new_tokens.expires_in),
+            )
+
         return HubSpotConnection(
             id=conn["id"],
             user_id=conn["user_id"],

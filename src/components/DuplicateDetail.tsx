@@ -1,8 +1,10 @@
 'use client'
 
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useEffect } from 'react'
 import { apiFetch } from '@/lib/api'
 
+// Represents one CRM record in a duplicate set. Covers BOTH contacts and
+// companies — company records populate the organization fields instead.
 interface Contact {
   id?: string
   email?: string
@@ -16,6 +18,12 @@ interface Contact {
   updated_at?: string
   association_count?: number
   raw_properties?: Record<string, unknown>
+  // Company fields:
+  name?: string
+  domain?: string
+  website?: string
+  industry?: string
+  country?: string
 }
 
 interface DuplicateSet {
@@ -31,6 +39,12 @@ interface DuplicateSet {
   excluded_record_ids?: string[]
 }
 
+// An associated (related) record fetched from the CRM for context.
+interface RelatedRecord {
+  id?: string
+  properties?: Record<string, string>
+}
+
 interface DuplicateDetailProps {
   duplicateSet: DuplicateSet
   scanId: string
@@ -38,10 +52,11 @@ interface DuplicateDetailProps {
   onPreviewUpdated?: (setId: string, preview: Record<string, unknown>) => void
 }
 
-function getContactName(contact: Contact): string {
-  if (contact.full_name) return contact.full_name
-  const parts = [contact.first_name, contact.last_name].filter(Boolean)
-  return parts.join(' ') || 'Unknown'
+// Records may be contacts OR companies — fall back to the company name.
+function getContactName(record: Contact): string {
+  if (record.full_name) return record.full_name
+  const person = [record.first_name, record.last_name].filter(Boolean).join(' ')
+  return person || record.name || record.company || 'Unknown'
 }
 
 function formatDate(dateStr?: string): string {
@@ -53,8 +68,8 @@ function formatDate(dateStr?: string): string {
   }
 }
 
-// Editable fields the user can pick values for
-const EDITABLE_FIELDS: { key: string; label: string }[] = [
+// Editable fields the user can pick values for — contacts vs companies.
+const CONTACT_EDITABLE_FIELDS: { key: string; label: string }[] = [
   { key: 'email', label: 'Email' },
   { key: 'first_name', label: 'First Name' },
   { key: 'last_name', label: 'Last Name' },
@@ -62,6 +77,21 @@ const EDITABLE_FIELDS: { key: string; label: string }[] = [
   { key: 'company', label: 'Company' },
   { key: 'job_title', label: 'Job Title' },
 ]
+
+const COMPANY_EDITABLE_FIELDS: { key: string; label: string }[] = [
+  { key: 'name', label: 'Company Name' },
+  { key: 'domain', label: 'Domain' },
+  { key: 'website', label: 'Website' },
+  { key: 'phone', label: 'Phone' },
+  { key: 'industry', label: 'Industry' },
+  { key: 'country', label: 'Country' },
+]
+
+// Company records carry organization fields (domain/industry/website) that
+// contacts never have — detect the shape so the modal shows the right rows.
+function isCompanyRecord(record: Contact): boolean {
+  return 'domain' in record || 'industry' in record || 'website' in record
+}
 
 // Read-only metadata fields
 const METADATA_FIELDS: { key: string; label: string; format?: 'date' | 'number' }[] = [
@@ -79,6 +109,11 @@ export default function DuplicateDetail({
   const winner = duplicateSet.winner_data
   const losers = duplicateSet.loser_data
   const allContacts = [winner, ...losers]
+  // Contacts and companies expose different editable fields; pick by record shape.
+  const EDITABLE_FIELDS = isCompanyRecord(winner) ? COMPANY_EDITABLE_FIELDS : CONTACT_EDITABLE_FIELDS
+  // Every other populated property (from raw_properties), shown read-only for context.
+  const editableKeySet = new Set(EDITABLE_FIELDS.map(f => f.key))
+  const allPropKeys = collectPropKeys(allContacts, editableKeySet)
 
   // Initialize merged preview from the stored preview or build from winner
   const [mergedPreview, setMergedPreview] = useState<Record<string, unknown>>(() => {
@@ -101,6 +136,52 @@ export default function DuplicateDetail({
 
   const [isSaving, setIsSaving] = useState(false)
   const [hasChanges, setHasChanges] = useState(false)
+
+  // Related records (associated contacts/deals/companies) fetched when the modal opens.
+  const [related, setRelated] = useState<Record<string, Record<string, RelatedRecord[]>>>({})
+  const [relatedLoading, setRelatedLoading] = useState(true)
+  const [showAllProps, setShowAllProps] = useState(true)
+  const [writableFields, setWritableFields] = useState<Set<string>>(new Set())
+
+  useEffect(() => {
+    let cancelled = false
+    const ids = allContacts.map(c => c.id).filter(Boolean) as string[]
+    Promise.all(
+      ids.map(async (id) => {
+        try {
+          const resp = await apiFetch(`/scan/${scanId}/records/${id}/associations`)
+          if (!resp.ok) return [id, {} as Record<string, RelatedRecord[]>] as const
+          const data = await resp.json()
+          return [id, (data.related || {}) as Record<string, RelatedRecord[]>] as const
+        } catch {
+          return [id, {} as Record<string, RelatedRecord[]>] as const
+        }
+      })
+    ).then((entries) => {
+      if (!cancelled) {
+        setRelated(Object.fromEntries(entries))
+        setRelatedLoading(false)
+      }
+    })
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scanId, duplicateSet.id])
+
+  // Which raw properties are writable — those become pick-to-merge fields.
+  useEffect(() => {
+    let cancelled = false
+    apiFetch(`/scan/${scanId}/editable-fields`)
+      .then(r => (r.ok ? r.json() : { fields: [] }))
+      .then((data: { fields?: { name: string }[] }) => {
+        if (!cancelled) setWritableFields(new Set((data.fields || []).map(f => f.name)))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [scanId])
 
   const pickFieldValue = useCallback((key: string, value: string) => {
     setMergedPreview(prev => ({ ...prev, [key]: value }))
@@ -295,8 +376,115 @@ export default function DuplicateDetail({
                       </td>
                     </tr>
                   ))}
+
+                  {/* All other populated properties (read-only context) */}
+                  {allPropKeys.length > 0 && (
+                    <tr>
+                      <td colSpan={allContacts.length + 2} className="py-2">
+                        <button
+                          onClick={() => setShowAllProps(v => !v)}
+                          className="text-xs text-gray-500 hover:text-gray-700 uppercase tracking-wider px-4"
+                        >
+                          {showAllProps ? '▾' : '▸'} All properties ({allPropKeys.length}) — ✎ = editable (click a value to pick it)
+                        </button>
+                      </td>
+                    </tr>
+                  )}
+                  {showAllProps && allPropKeys.map((key) => {
+                    const writable = writableFields.has(key)
+                    const mergedRaw = mergedPreview[key] as string | undefined
+                    const mergedDisplay = writable ? (mergedRaw ?? rawVal(winner, key)) : rawVal(winner, key)
+                    return (
+                      <tr key={`prop-${key}`} className="border-b">
+                        <td className="py-2 px-4 text-xs font-medium text-gray-500 break-all">
+                          {key}
+                          {writable && (
+                            <span className="ml-1 text-blue-400" title="Editable — click a value to use it">✎</span>
+                          )}
+                        </td>
+                        {allContacts.map((contact, idx) => {
+                          const val = rawVal(contact, key)
+                          const colExcluded = idx > 0 && !!contact.id && excludedIds.has(contact.id)
+                          const isSelected = writable && !!val && val === mergedDisplay
+                          const pickable = writable && !!val && !colExcluded
+                          return (
+                            <td
+                              key={idx}
+                              onClick={() => { if (pickable) pickFieldValue(key, val) }}
+                              title={pickable ? 'Click to use this value' : ''}
+                              className={`py-2 px-4 text-xs break-all ${idx === 0 ? 'bg-green-50' : 'bg-gray-50'} ${colExcluded ? 'opacity-40 line-through' : ''} ${
+                                isSelected && !colExcluded
+                                  ? 'ring-2 ring-inset ring-blue-500 font-medium text-blue-900'
+                                  : val ? 'text-gray-700' : 'text-gray-300'
+                              } ${pickable ? 'cursor-pointer hover:bg-blue-50' : ''}`}
+                            >
+                              {val || '-'}
+                              {isSelected && !colExcluded && <span className="ml-1 text-blue-500">&#10003;</span>}
+                            </td>
+                          )
+                        })}
+                        <td className={`py-2 px-4 text-xs bg-blue-50 break-all ${writable ? 'text-gray-900 font-medium' : 'text-gray-700'}`}>
+                          {mergedDisplay || '-'}
+                        </td>
+                      </tr>
+                    )
+                  })}
                 </tbody>
               </table>
+            </div>
+
+            {/* Related records */}
+            <div className="mt-6">
+              <h3 className="text-sm font-medium text-gray-700 mb-3">Related records</h3>
+              {relatedLoading ? (
+                <p className="text-sm text-gray-400">Loading related records…</p>
+              ) : (
+                <div
+                  className="grid gap-4"
+                  style={{ gridTemplateColumns: `repeat(${allContacts.length}, minmax(0, 1fr))` }}
+                >
+                  {allContacts.map((rec, idx) => {
+                    const rel: Record<string, RelatedRecord[]> = (rec.id ? related[rec.id] : undefined) || {}
+                    const isExcluded = idx > 0 && !!rec.id && excludedIds.has(rec.id)
+                    const groups = Object.entries(rel).filter(([, items]) => items && items.length > 0)
+                    return (
+                      <div
+                        key={idx}
+                        className={`border rounded-lg p-3 ${idx === 0 ? 'border-green-200 bg-green-50/40' : 'border-gray-200'} ${isExcluded ? 'opacity-40' : ''}`}
+                      >
+                        <p className="text-xs font-semibold text-gray-700 mb-2 truncate">
+                          {idx === 0 ? '★ ' : ''}{getContactName(rec)}
+                        </p>
+                        {groups.length === 0 ? (
+                          <p className="text-xs text-gray-400">No related records</p>
+                        ) : (
+                          groups.map(([toObject, items]) => (
+                            <div key={toObject} className="mb-2">
+                              <p className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">
+                                {toObject} ({items.length})
+                              </p>
+                              <ul className="space-y-1">
+                                {items.slice(0, 8).map((it, i) => {
+                                  const f = formatRelated(toObject, it.properties || {})
+                                  return (
+                                    <li key={i} className="text-xs text-gray-700 truncate">
+                                      <span className="font-medium">{f.title}</span>
+                                      {f.sub && <span className="text-gray-400"> · {f.sub}</span>}
+                                    </li>
+                                  )
+                                })}
+                                {items.length > 8 && (
+                                  <li className="text-xs text-gray-400">+{items.length - 8} more</li>
+                                )}
+                              </ul>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    )
+                  })}
+                </div>
+              )}
             </div>
 
             {/* Legend */}
@@ -354,4 +542,43 @@ function getFieldValue(contact: Contact, key: string): string {
   const value = contact[key as keyof Contact]
   if (value === undefined || value === null) return ''
   return String(value)
+}
+
+/** Union of every raw_properties key that is non-null on at least one record,
+ *  excluding keys already shown as editable rows. Sorted for stable display. */
+function collectPropKeys(records: Contact[], exclude: Set<string>): string[] {
+  const keys = new Set<string>()
+  for (const r of records) {
+    const rp = r.raw_properties || {}
+    for (const k of Object.keys(rp)) {
+      if (exclude.has(k)) continue
+      const v = rp[k]
+      if (v !== null && v !== undefined && v !== '') keys.add(k)
+    }
+  }
+  return Array.from(keys).sort()
+}
+
+/** A raw_properties value as a display string. */
+function rawVal(contact: Contact, key: string): string {
+  const v = contact.raw_properties?.[key]
+  if (v === null || v === undefined) return ''
+  return String(v)
+}
+
+/** Format one related record into a title + subtitle for the given object type. */
+function formatRelated(toObject: string, props: Record<string, string>): { title: string; sub: string } {
+  if (toObject === 'contacts') {
+    const name = [props.firstname, props.lastname].filter(Boolean).join(' ') || props.email || '(contact)'
+    const sub = [props.jobtitle, name !== props.email ? props.email : ''].filter(Boolean).join(' · ')
+    return { title: name, sub }
+  }
+  if (toObject === 'deals') {
+    const amt = props.amount ? `$${Number(props.amount).toLocaleString()}` : ''
+    return { title: props.dealname || '(deal)', sub: [amt, props.dealstage].filter(Boolean).join(' · ') }
+  }
+  if (toObject === 'companies') {
+    return { title: props.name || props.domain || '(company)', sub: props.name && props.domain ? props.domain : '' }
+  }
+  return { title: '(record)', sub: '' }
 }

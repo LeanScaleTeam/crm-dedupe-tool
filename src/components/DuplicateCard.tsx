@@ -1,5 +1,7 @@
 'use client'
 
+// Represents one CRM record in a duplicate set. Covers BOTH contacts and
+// companies — company records populate the organization fields instead.
 interface Contact {
   id?: string
   email?: string
@@ -10,6 +12,12 @@ interface Contact {
   company?: string
   created_at?: string
   association_count?: number
+  // Company fields:
+  name?: string
+  domain?: string
+  website?: string
+  industry?: string
+  country?: string
 }
 
 interface DuplicateSet {
@@ -32,10 +40,16 @@ interface DuplicateCardProps {
   onExpand: () => void
 }
 
-function getContactName(contact: Contact): string {
-  if (contact.full_name) return contact.full_name
-  const parts = [contact.first_name, contact.last_name].filter(Boolean)
-  return parts.join(' ') || 'Unknown'
+// Records may be contacts OR companies — fall back to the company name.
+function getContactName(record: Contact): string {
+  if (record.full_name) return record.full_name
+  const person = [record.first_name, record.last_name].filter(Boolean).join(' ')
+  return person || record.name || record.company || 'Unknown'
+}
+
+// Subtitle: email for contacts, web domain/website for companies.
+function getSubtitle(record: Contact): string {
+  return record.email || record.domain || record.website || '—'
 }
 
 function getConfidenceColor(confidence: number): string {
@@ -131,7 +145,7 @@ export default function DuplicateCard({
                   {getContactName(winner)}
                 </p>
                 <p className="text-sm text-gray-500 truncate">
-                  {winner.email || 'No email'}
+                  {getSubtitle(winner)}
                 </p>
               </div>
             </div>
@@ -150,7 +164,7 @@ export default function DuplicateCard({
                     {getContactName(loser)}
                   </p>
                   <p className="text-sm text-gray-500 truncate">
-                    {loser.email || 'No email'}
+                    {getSubtitle(loser)}
                   </p>
                 </div>
               </div>

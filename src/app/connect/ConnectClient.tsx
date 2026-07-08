@@ -65,6 +65,24 @@ export default function ConnectClient({ user, connections, oauthError, oauthSucc
     window.location.href = authUrl
   }
 
+  const handleHubSpotConnect = () => {
+    setIsLoading(true)
+    const clientId = process.env.NEXT_PUBLIC_HUBSPOT_CLIENT_ID
+    const redirectUri = `${window.location.origin}/api/hubspot/callback`
+    // Read + write for the objects we dedupe (write needed to merge); schema scopes
+    // for property discovery (all-field capture). No PKCE for HubSpot.
+    const scopes = [
+      'oauth',
+      'crm.objects.contacts.read', 'crm.objects.contacts.write',
+      'crm.objects.companies.read', 'crm.objects.companies.write',
+      'crm.objects.deals.read',
+      'crm.schemas.contacts.read', 'crm.schemas.companies.read', 'crm.schemas.deals.read',
+    ].join(' ')
+    const authUrl = `https://app.hubspot.com/oauth/authorize?client_id=${clientId}`
+      + `&redirect_uri=${encodeURIComponent(redirectUri)}&scope=${encodeURIComponent(scopes)}`
+    window.location.href = authUrl
+  }
+
   const handleDisconnect = async (conn: CrmConnection) => {
     if (!confirm('Disconnect this org? Its stored tokens will be removed.')) return
     setBusyId(conn.id)
@@ -210,6 +228,20 @@ export default function ConnectClient({ user, connections, oauthError, oauthSucc
             <div className="text-left">
               <p className="font-medium text-gray-900">Connect Salesforce ({sfEnv})</p>
               <p className="text-sm text-gray-500">Authorize access to a {sfEnv} org — you can add as many as you like</p>
+            </div>
+          </button>
+
+          <button
+            onClick={handleHubSpotConnect}
+            disabled={isLoading}
+            className="w-full flex items-center gap-3 p-4 mt-3 border-2 border-gray-200 rounded-lg hover:border-orange-500 hover:bg-orange-50 transition-colors disabled:opacity-50"
+          >
+            <div className="w-10 h-10 bg-orange-500 rounded-lg flex items-center justify-center shrink-0">
+              <span className="text-white font-bold">HS</span>
+            </div>
+            <div className="text-left">
+              <p className="font-medium text-gray-900">Connect HubSpot</p>
+              <p className="text-sm text-gray-500">Authorize a HubSpot portal — contacts &amp; companies</p>
             </div>
           </button>
         </div>

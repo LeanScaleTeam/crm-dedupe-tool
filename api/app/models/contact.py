@@ -50,8 +50,13 @@ class Contact(BaseModel):
 
 
 class DuplicateSet(BaseModel):
-    """A set of duplicate contacts with a determined winner."""
+    """A set of duplicate records with a determined winner.
+
+    winner/losers are typed Any so the same set works for Contact OR Company
+    records — the company dedupe path reuses this shape. Consumers only touch
+    .id / .model_dump() / model attributes, never re-validate the set itself.
+    """
     confidence: float  # 0-100
-    winner: Contact
-    losers: list[Contact]
+    winner: Any
+    losers: list[Any]
     merged_preview: dict[str, Any]  # What the merged record will look like

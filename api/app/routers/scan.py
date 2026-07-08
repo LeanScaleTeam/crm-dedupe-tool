@@ -11,7 +11,12 @@ from app.auth import require_user
 from app.services.supabase_client import get_supabase
 from app.services.crm_factory import get_crm_services
 from app.services.tenancy import assert_tenant_access
-from app.services.dedup_engine import DuplicateDetector, WinnerSelector, FieldBlender
+from app.services.dedup_engine import (
+    DuplicateDetector,
+    CompanyDuplicateDetector,
+    WinnerSelector,
+    FieldBlender,
+)
 from app.services.match_engine import MatchEngine, MatchProfile
 
 router = APIRouter()
@@ -128,6 +133,66 @@ async def run_account_scan(scan_id: str, user_id: str, connection_id: str, confi
     }).eq("id", scan_id).execute()
 
 
+async def run_company_scan(scan_id: str, user_id: str, connection_id: str, config: dict, supabase):
+    """HubSpot company dedupe — real merge path.
+
+    Mirrors the contacts pipeline (fetch -> detect -> winner -> blend -> store),
+    but uses the company fetch service, the domain/name matcher, and company
+    display fields. Approved sets merge via the native companies merge endpoint.
+    """
+    _, companies_service, _ = await get_crm_services(
+        user_id, connection_id, object_type="companies"
+    )
+
+    detector = CompanyDuplicateDetector(confidence_threshold=config["confidence_threshold"])
+    winner_selector = WinnerSelector(config["winner_rules"])
+    field_blender = FieldBlender(editable_fields=FieldBlender.COMPANY_FIELDS)
+
+    total = await companies_service.get_total_companies()
+
+    async def progress_callback(count: int):
+        progress = min(int((count / max(total, 1)) * 50), 50)  # first 50% is fetching
+        supabase.table("scans").update(
+            {"progress": progress, "records_scanned": count}
+        ).eq("id", scan_id).execute()
+
+    companies = []
+    async for company in companies_service.get_all_companies(progress_callback):
+        companies.append(company)
+
+    supabase.table("scans").update(
+        {"progress": 50, "records_scanned": len(companies)}
+    ).eq("id", scan_id).execute()
+
+    duplicate_sets = detector.find_duplicates(companies)
+
+    for i, dup_set in enumerate(duplicate_sets):
+        all_companies = [dup_set.winner] + dup_set.losers
+        winner, losers = winner_selector.select_winner(all_companies)
+        merged_preview = field_blender.blend(winner, losers)
+        supabase.table("duplicate_sets").insert({
+            "id": str(uuid.uuid4()),
+            "scan_id": scan_id,
+            "confidence": dup_set.confidence,
+            "winner_record_id": winner.id,
+            "loser_record_ids": [l.id for l in losers],
+            "winner_data": winner.model_dump(mode="json"),
+            "loser_data": [l.model_dump(mode="json") for l in losers],
+            "merged_preview": merged_preview,
+        }).execute()
+        progress = 50 + int((i / max(len(duplicate_sets), 1)) * 50)
+        supabase.table("scans").update(
+            {"progress": progress, "duplicates_found": i + 1}
+        ).eq("id", scan_id).execute()
+
+    supabase.table("scans").update({
+        "status": "completed",
+        "progress": 100,
+        "duplicates_found": len(duplicate_sets),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", scan_id).execute()
+
+
 async def run_scan(scan_id: str, user_id: str, connection_id: str, config: dict):
     """
     Background task to run the duplicate detection scan.
@@ -145,6 +210,17 @@ async def run_scan(scan_id: str, user_id: str, connection_id: str, config: dict)
         if config["object_type"] == "accounts":
             await run_account_scan(scan_id, user_id, connection_id, config, supabase)
             return
+
+        # Companies run the real-merge dedupe pipeline (HubSpot), matching on
+        # domain + normalized name rather than email + person name.
+        if config["object_type"] == "companies":
+            await run_company_scan(scan_id, user_id, connection_id, config, supabase)
+            return
+
+        # Only contacts remain. Reject anything else instead of silently running the
+        # contacts pipeline against the wrong object (data-destruction guard).
+        if config["object_type"] != "contacts":
+            raise Exception(f"Object type '{config['object_type']}' is not supported yet.")
 
         # Get CRM services based on connection type
         connection, contacts_service, _ = await get_crm_services(user_id, connection_id)
@@ -395,3 +471,65 @@ async def update_duplicate_set(
         )
 
     return result.data[0]
+
+
+@router.get("/{scan_id}/records/{record_id}/associations")
+async def get_record_associations(
+    scan_id: str,
+    record_id: str,
+    user_id: str = Depends(require_user),
+):
+    """Related records (associated contacts / deals / companies) for one record in
+    a duplicate set — HubSpot only. Read-only context for the review comparison
+    screen. Returns {"related": {to_object: [{id, properties}]}}."""
+    supabase = get_supabase()
+    scan = _assert_scan_access(supabase, scan_id, user_id)
+
+    # Associations are wired for HubSpot contacts + companies only.
+    object_type = scan.get("object_type")
+    if object_type not in ("companies", "contacts"):
+        return {"related": {}}
+
+    connection_id = scan.get("connection_id")
+    conn_row = supabase.table("crm_connections").select("crm_type").eq(
+        "id", connection_id
+    ).single().execute()
+    if (conn_row.data or {}).get("crm_type") != "hubspot":
+        return {"related": {}}
+
+    # Resolve the connection (refreshes the token if needed); we only need its token.
+    connection, _, _ = await get_crm_services(user_id, connection_id, object_type=object_type)
+    from app.services.hubspot_associations import get_related_records
+
+    related = await get_related_records(connection.access_token, object_type, record_id)
+    return {"related": related}
+
+
+@router.get("/{scan_id}/editable-fields")
+async def get_editable_fields(
+    scan_id: str,
+    user_id: str = Depends(require_user),
+):
+    """Writable properties for the scan's object type (HubSpot) so the review UI
+    can offer them as pick-to-merge fields. Read-only/calculated properties are
+    excluded — writing them would fail the pre-merge update. Returns
+    {"fields": [{name, label}]}."""
+    supabase = get_supabase()
+    scan = _assert_scan_access(supabase, scan_id, user_id)
+
+    hs_object = {"companies": "companies", "contacts": "contacts"}.get(scan.get("object_type"))
+    if not hs_object:
+        return {"fields": []}
+
+    connection_id = scan.get("connection_id")
+    conn_row = supabase.table("crm_connections").select("crm_type").eq(
+        "id", connection_id
+    ).single().execute()
+    if (conn_row.data or {}).get("crm_type") != "hubspot":
+        return {"fields": []}
+
+    connection, _, _ = await get_crm_services(user_id, connection_id, object_type=scan.get("object_type"))
+    from app.services.hubspot_properties import get_writable_properties
+
+    fields = await get_writable_properties(connection.access_token, hs_object)
+    return {"fields": fields}

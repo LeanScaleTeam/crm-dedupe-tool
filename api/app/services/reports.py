@@ -105,17 +105,31 @@ class ReportService:
 
         # Per-record detail: for each merged set, the surviving record + the records
         # merged into it, with ALL captured fields (from the pre-merge backups).
-        report_fields = [
-            {"key": "first_name", "label": "First Name"},
-            {"key": "last_name", "label": "Last Name"},
-            {"key": "email", "label": "Email"},
-            {"key": "phone", "label": "Phone"},
-            {"key": "company", "label": "Company"},
-            {"key": "job_title", "label": "Job Title"},
-            {"key": "created_at", "label": "Created"},
-            {"key": "updated_at", "label": "Updated"},
-            {"key": "association_count", "label": "Associations"},
-        ]
+        # Columns depend on the object type — companies have no person fields.
+        if scan.get("object_type") == "companies":
+            report_fields = [
+                {"key": "name", "label": "Company Name"},
+                {"key": "domain", "label": "Domain"},
+                {"key": "website", "label": "Website"},
+                {"key": "phone", "label": "Phone"},
+                {"key": "industry", "label": "Industry"},
+                {"key": "country", "label": "Country"},
+                {"key": "created_at", "label": "Created"},
+                {"key": "updated_at", "label": "Updated"},
+                {"key": "association_count", "label": "Associations"},
+            ]
+        else:
+            report_fields = [
+                {"key": "first_name", "label": "First Name"},
+                {"key": "last_name", "label": "Last Name"},
+                {"key": "email", "label": "Email"},
+                {"key": "phone", "label": "Phone"},
+                {"key": "company", "label": "Company"},
+                {"key": "job_title", "label": "Job Title"},
+                {"key": "created_at", "label": "Created"},
+                {"key": "updated_at", "label": "Updated"},
+                {"key": "association_count", "label": "Associations"},
+            ]
 
         def _record(c: dict, role: str) -> dict:
             c = c or {}
@@ -281,7 +295,11 @@ class ReportService:
             return str(v if v not in (None, "") else "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
 
         def _rname(r: dict) -> str:
-            return " ".join(p for p in [r.get("first_name"), r.get("last_name")] if p) or r.get("email") or "(record)"
+            # Contacts show person name/email; companies fall back to company name.
+            return (
+                " ".join(p for p in [r.get("first_name"), r.get("last_name")] if p)
+                or r.get("name") or r.get("email") or "(record)"
+            )
 
         set_blocks = []
         for i, s in enumerate(merged_sets, 1):

@@ -1,14 +1,19 @@
-"""HubSpot contacts fetching service."""
+"""HubSpot companies fetching service.
+
+Mirrors HubSpotContactsService but targets the companies object: different
+endpoint, property catalog, and record mapping (name/domain/website, not
+email/first/last). Yields Company records for the company dedupe pipeline.
+"""
 import httpx
 from typing import AsyncGenerator, Optional
 from datetime import datetime
 
-from app.models.contact import Contact
-from app.services.hubspot import HubSpotService, HubSpotConnection
+from app.models.company import Company
+from app.services.hubspot import HubSpotConnection
 
 
-class HubSpotContactsService:
-    """Service for fetching contacts from HubSpot."""
+class HubSpotCompaniesService:
+    """Service for fetching companies from HubSpot."""
 
     BASE_URL = "https://api.hubapi.com"
     BATCH_SIZE = 100  # HubSpot's max per request
@@ -17,19 +22,19 @@ class HubSpotContactsService:
         self.connection = connection
         self.access_token = connection.access_token
 
-    async def get_all_contacts(
+    async def get_all_companies(
         self,
         progress_callback: Optional[callable] = None
-    ) -> AsyncGenerator[Contact, None]:
+    ) -> AsyncGenerator[Company, None]:
         """
-        Fetch all contacts from HubSpot with pagination.
-        Yields contacts one at a time for memory efficiency.
+        Fetch all companies from HubSpot with pagination.
+        Yields companies one at a time for memory efficiency.
         """
         after = None
         total_fetched = 0
 
         async with httpx.AsyncClient() as client:
-            # Discover ALL contact properties so raw_properties captures every
+            # Discover ALL company properties so raw_properties captures every
             # populated field, not a hardcoded subset. (HubSpot returns nothing
             # you don't explicitly request.)
             properties = await self._get_property_names(client)
@@ -42,7 +47,7 @@ class HubSpotContactsService:
                     params["after"] = after
 
                 response = await client.get(
-                    f"{self.BASE_URL}/crm/v3/objects/contacts",
+                    f"{self.BASE_URL}/crm/v3/objects/companies",
                     params=params,
                     headers={
                         "Authorization": f"Bearer {self.access_token}",
@@ -53,28 +58,30 @@ class HubSpotContactsService:
                 if response.status_code != 200:
                     # Log the raw provider body server-side; the generic message is
                     # what reaches scans.error_message (shown to tenant members).
-                    print(f"[hubspot] fetch contacts failed ({response.status_code}): {response.text}")
-                    raise Exception("Failed to fetch HubSpot contacts.")
+                    print(f"[hubspot] fetch companies failed ({response.status_code}): {response.text}")
+                    raise Exception("Failed to fetch HubSpot companies.")
 
                 data = response.json()
                 results = data.get("results", [])
 
                 for record in results:
                     props = record.get("properties", {})
-                    contact = Contact(
+                    company = Company(
                         id=record["id"],
-                        email=props.get("email"),
-                        first_name=props.get("firstname"),
-                        last_name=props.get("lastname"),
+                        name=props.get("name"),
+                        domain=props.get("domain"),
+                        website=props.get("website"),
                         phone=props.get("phone"),
-                        company=props.get("company"),
-                        job_title=props.get("jobtitle"),
+                        industry=props.get("industry"),
+                        country=props.get("country"),
                         created_at=self._parse_datetime(props.get("createdate")),
-                        updated_at=self._parse_datetime(props.get("lastmodifieddate")),
+                        updated_at=self._parse_datetime(
+                            props.get("hs_lastmodifieddate") or props.get("lastmodifieddate")
+                        ),
                         association_count=self._count_associations(props),
                         raw_properties=props,
                     )
-                    yield contact
+                    yield company
                     total_fetched += 1
 
                 # Progress callback
@@ -90,24 +97,25 @@ class HubSpotContactsService:
                     break  # No more pages
 
     async def _get_property_names(self, client: httpx.AsyncClient) -> list:
-        """Every contact property name (from the property catalog) so we can request
+        """Every company property name (from the property catalog) so we can request
         them all. Falls back to a core set if the catalog call fails."""
         try:
             resp = await client.get(
-                f"{self.BASE_URL}/crm/v3/properties/contacts",
+                f"{self.BASE_URL}/crm/v3/properties/companies",
                 headers={"Authorization": f"Bearer {self.access_token}"},
             )
             if resp.status_code == 200:
                 names = [p["name"] for p in resp.json().get("results", []) if p.get("name")]
                 if names:
                     return names
-            print(f"[hubspot] property catalog fetch failed ({resp.status_code}): {resp.text}")
+            print(f"[hubspot] company property catalog fetch failed ({resp.status_code}): {resp.text}")
         except Exception as e:
-            print(f"[hubspot] property catalog error: {e}")
+            print(f"[hubspot] company property catalog error: {e}")
         return [
-            "email", "firstname", "lastname", "phone", "company",
-            "jobtitle", "createdate", "lastmodifieddate",
-            "num_associated_deals", "num_contacted_times",
+            "name", "domain", "website", "phone", "industry", "country",
+            "city", "state", "numberofemployees", "annualrevenue",
+            "createdate", "hs_lastmodifieddate",
+            "num_associated_contacts", "num_associated_deals",
         ]
 
     def _parse_datetime(self, value: Optional[str]) -> Optional[datetime]:
@@ -115,7 +123,6 @@ class HubSpotContactsService:
         if not value:
             return None
         try:
-            # HubSpot uses ISO format
             return datetime.fromisoformat(value.replace("Z", "+00:00"))
         except (ValueError, TypeError):
             return None
@@ -123,18 +130,18 @@ class HubSpotContactsService:
     def _count_associations(self, props: dict) -> int:
         """Count associated records from properties."""
         count = 0
-        for key in ["num_associated_deals", "num_contacted_times"]:
+        for key in ["num_associated_contacts", "num_associated_deals"]:
             try:
                 count += int(props.get(key, 0) or 0)
             except (ValueError, TypeError):
                 pass
         return count
 
-    async def get_total_contacts(self) -> int:
-        """Get total count of contacts (for progress calculation)."""
+    async def get_total_companies(self) -> int:
+        """Get total count of companies (for progress calculation)."""
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"{self.BASE_URL}/crm/v3/objects/contacts",
+                f"{self.BASE_URL}/crm/v3/objects/companies",
                 params={"limit": 1},
                 headers={
                     "Authorization": f"Bearer {self.access_token}",

@@ -234,6 +234,61 @@ class DuplicateDetector:
         return duplicate_sets
 
 
+class CompanyDuplicateDetector(DuplicateDetector):
+    """Duplicate detector tuned for company/organization records.
+
+    Companies have no email — the strong signal is the web domain, backed by a
+    legal-suffix-stripped name. Only blocking and pairwise scoring change; the
+    Union-Find grouping (find_duplicates / _build_duplicate_sets) is reused as-is.
+    """
+
+    def create_blocks(self, companies: list) -> dict[str, list]:
+        """Group companies into blocks by normalized domain and name prefix.
+
+        No email/exact-email blocking (companies have none). Domain is the primary
+        recall driver; the name prefix catches domain-less records.
+        """
+        blocks: dict[str, list] = defaultdict(list)
+        for company in companies:
+            if company.normalized_domain:
+                blocks[f"domain:{company.normalized_domain}"].append(company)
+            if company.name_prefix:
+                blocks[f"name:{company.name_prefix}"].append(company)
+        return blocks
+
+    def _calculate_similarity(self, a, b) -> float:
+        """Similarity between two companies.
+
+        Weights:
+        - Domain: 70% (strongest company identifier)
+        - Name:   30% (legal-normalized, reordering-tolerant)
+        """
+        scores = []
+        weights = []
+
+        # Domain similarity (if both have a domain)
+        if a.normalized_domain and b.normalized_domain:
+            if a.normalized_domain == b.normalized_domain:
+                domain_sim = 1.0
+            else:
+                domain_sim = fuzz.ratio(a.normalized_domain, b.normalized_domain) / 100
+            scores.append(domain_sim)
+            weights.append(0.7)
+
+        # Name similarity (if both have a name)
+        if a.normalized_name and b.normalized_name:
+            name_sim = fuzz.token_sort_ratio(a.normalized_name, b.normalized_name) / 100
+            scores.append(name_sim)
+            weights.append(0.3)
+
+        if not scores:
+            return 0.0
+
+        total_weight = sum(weights)
+        weighted_sum = sum(s * w for s, w in zip(scores, weights))
+        return weighted_sum / total_weight
+
+
 class WinnerSelector:
     """
     Selects the winning record from a duplicate set based on configured rules.
@@ -335,10 +390,18 @@ class FieldBlender:
     EDITABLE_FIELDS = [
         "email", "first_name", "last_name", "phone", "company", "job_title",
     ]
+    # Company/organization display fields (used for the company dedupe path).
+    COMPANY_FIELDS = [
+        "name", "domain", "website", "phone", "industry", "country",
+    ]
 
-    def blend(self, winner: Contact, losers: list[Contact]) -> dict:
+    def __init__(self, editable_fields: Optional[list[str]] = None):
+        # Defaults to the contact field set; the company path passes COMPANY_FIELDS.
+        self.editable_fields = editable_fields or self.EDITABLE_FIELDS
+
+    def blend(self, winner, losers: list) -> dict:
         """
-        Create merged record preview using Contact model field names.
+        Create merged record preview using model field names.
 
         Strategy:
         - Winner's fields take precedence
@@ -346,16 +409,16 @@ class FieldBlender:
         - Include metadata fields from the winner
 
         Returns:
-            Dict with Contact model field names as keys.
+            Dict with model field names (contact or company) as keys.
         """
         merged: dict = {}
 
         # Start with winner's values for all display fields
-        for field in self.EDITABLE_FIELDS:
+        for field in self.editable_fields:
             merged[field] = getattr(winner, field, None) or ""
 
         # Fill gaps from losers
-        for field in self.EDITABLE_FIELDS:
+        for field in self.editable_fields:
             if not merged[field]:
                 for loser in losers:
                     value = getattr(loser, field, None)
