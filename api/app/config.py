@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     cors_origins: list[str] = [
         "http://localhost:3000",
         "https://crm-dedup-tool.netlify.app",
+        "https://dedupe.leanscale.team",
     ]
 
     class Config:
