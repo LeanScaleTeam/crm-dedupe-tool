@@ -105,8 +105,9 @@ class ReportService:
 
         # Per-record detail: for each merged set, the surviving record + the records
         # merged into it, with ALL captured fields (from the pre-merge backups).
-        # Columns depend on the object type — companies have no person fields.
-        if scan.get("object_type") == "companies":
+        # Columns depend on the object type — companies AND simple-mode accounts are
+        # organization-shaped (name/domain/…), not person-shaped.
+        if scan.get("object_type") in ("companies", "accounts"):
             report_fields = [
                 {"key": "name", "label": "Company Name"},
                 {"key": "domain", "label": "Domain"},

@@ -62,6 +62,8 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
   const objectTypes = objectTypesForCrm(connection.crm_type)
   const [objectType, setObjectType] = useState<ObjectType>('contacts')
   const [matchProfile, setMatchProfile] = useState<string>('scandit/account_v3')
+  const [accountEngine, setAccountEngine] = useState<'simple' | 'config'>('simple')
+  const [configDryRun, setConfigDryRun] = useState(true)
   const [winnerRules, setWinnerRules] = useState<WinnerRule[]>([
     { type: 'oldest_created' },
     { type: 'most_associations' },
@@ -100,7 +102,14 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
             object_type: objectType,
             winner_rules: activeRules,
             confidence_threshold: confidenceThreshold / 100,
-            ...(objectType === 'accounts' ? { match_profile: matchProfile } : {}),
+            ...(objectType === 'accounts'
+              ? {
+                  account_engine: accountEngine,
+                  // simple mode always real-merges; config mode is view-only unless unchecked.
+                  dry_run: accountEngine === 'config' ? configDryRun : false,
+                  ...(accountEngine === 'config' ? { match_profile: matchProfile } : {}),
+                }
+              : {}),
           },
         }),
       })
@@ -177,23 +186,50 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
             </div>
           </div>
 
-          {/* Match Profile (accounts dry-run) */}
+          {/* Account matching engine */}
           {objectType === 'accounts' && (
-            <div className="bg-white rounded-lg shadow p-6">
-              <h2 className="text-lg font-semibold text-gray-900 mb-2">Match Profile</h2>
-              <p className="text-sm text-gray-500 mb-4">
-                Accounts use a config-driven, client-specific matching profile (name + custom-field
-                discriminators + deterministic keys). This run is <strong>view-only</strong> — no records are merged.
-              </p>
-              <select
-                value={matchProfile}
-                onChange={(e) => setMatchProfile(e.target.value)}
-                className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
-              >
-                {ACCOUNT_PROFILES.map((p) => (
-                  <option key={p.value} value={p.value}>{p.label}</option>
-                ))}
-              </select>
+            <div className="bg-white rounded-lg shadow p-6 space-y-4">
+              <h2 className="text-lg font-semibold text-gray-900">Account Matching</h2>
+              <div className="grid gap-3">
+                <label className={`flex items-start p-3 border-2 rounded-lg cursor-pointer transition-colors ${accountEngine === 'simple' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+                  <input type="radio" name="accountEngine" value="simple" checked={accountEngine === 'simple'} onChange={() => setAccountEngine('simple')} className="mt-1 mr-3" />
+                  <div>
+                    <p className="font-medium text-gray-900">Simple <span className="text-xs text-gray-500">(recommended)</span></p>
+                    <p className="text-sm text-gray-500">Match on website domain + account name. Works on any org (standard fields only). Real merge.</p>
+                  </div>
+                </label>
+                <label className={`flex items-start p-3 border-2 rounded-lg cursor-pointer transition-colors ${accountEngine === 'config' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}>
+                  <input type="radio" name="accountEngine" value="config" checked={accountEngine === 'config'} onChange={() => setAccountEngine('config')} className="mt-1 mr-3" />
+                  <div>
+                    <p className="font-medium text-gray-900">Config-driven <span className="text-xs text-gray-500">(client-tuned)</span></p>
+                    <p className="text-sm text-gray-500">Fingerprints, discriminators, and hierarchy via a profile. Requires the org&apos;s custom fields (e.g. Scandit).</p>
+                  </div>
+                </label>
+              </div>
+
+              {accountEngine === 'config' && (
+                <div className="border-t pt-4 space-y-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">Match Profile</label>
+                    <select
+                      value={matchProfile}
+                      onChange={(e) => setMatchProfile(e.target.value)}
+                      className="w-full px-3 py-2 border border-gray-300 rounded-md shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500"
+                    >
+                      {ACCOUNT_PROFILES.map((p) => (
+                        <option key={p.value} value={p.value}>{p.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <label className="flex items-center gap-2 text-sm text-gray-700">
+                    <input type="checkbox" checked={configDryRun} onChange={(e) => setConfigDryRun(e.target.checked)} className="h-4 w-4 rounded border-gray-300" />
+                    View-only (dry-run) — no records are merged
+                  </label>
+                  {!configDryRun && (
+                    <p className="text-sm text-amber-700">⚠ Real merge enabled — approved sets will be permanently merged in Salesforce.</p>
+                  )}
+                </div>
+              )}
             </div>
           )}
 
@@ -305,7 +341,7 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
             <h3 className="font-medium text-yellow-900 mb-2">What happens next?</h3>
             <ul className="text-sm text-yellow-800 space-y-1 list-disc list-inside">
               <li>We&apos;ll fetch all {objectType} from your CRM</li>
-              <li>Duplicates will be detected using fuzzy matching on {objectType === 'companies' ? 'company name and web domain' : 'names and emails'}</li>
+              <li>Duplicates will be detected using fuzzy matching on {objectType === 'companies' || objectType === 'accounts' ? 'name and web domain' : 'names and emails'}</li>
               <li>You&apos;ll review each duplicate set before any changes are made</li>
               <li>This process is safe - no data is modified until you approve</li>
             </ul>

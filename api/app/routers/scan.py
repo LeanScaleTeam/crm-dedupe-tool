@@ -35,7 +35,11 @@ class ScanConfig(BaseModel):
     object_type: str  # 'contacts', 'accounts', 'companies', 'deals', 'leads'
     winner_rules: List[WinnerRule] = []
     confidence_threshold: float = 0.9
-    match_profile: Optional[str] = None  # e.g. 'scandit/account_v3' (accounts dry-run)
+    match_profile: Optional[str] = None  # e.g. 'scandit/account_v3' (config engine)
+    # Accounts only: 'simple' (generic domain+name real merge, any org) or 'config'
+    # (client-tuned MatchEngine). dry_run gates merging — real merge requires False.
+    account_engine: Optional[str] = "simple"
+    dry_run: bool = False
 
 
 class ScanRequest(BaseModel):
@@ -65,8 +69,15 @@ def _account_display(m: dict) -> dict:
 
 
 async def run_account_scan(scan_id: str, user_id: str, connection_id: str, config: dict, supabase):
-    """Config-driven account dedupe — VIEW ONLY (dry-run). No Salesforce writes."""
+    """Config-driven (client-tuned MatchEngine) account dedupe.
+
+    View-only by default; set config dry_run=False to make the resulting sets
+    mergeable (real merge then runs via the Account SOAP merge service).
+    """
     from app.services.salesforce_accounts import SalesforceAccountsService
+
+    # config engine defaults to dry-run (view-only) for safety.
+    dry_run = config.get("dry_run", True)
 
     connection, _, _ = await get_crm_services(user_id, connection_id)
     if not getattr(connection, "instance_url", None):
@@ -108,7 +119,7 @@ async def run_account_scan(scan_id: str, user_id: str, connection_id: str, confi
             "winner_data": winner,
             "loser_data": losers,
             "merged_preview": {
-                "dry_run": True,
+                "dry_run": dry_run,
                 "verification_status": cluster.verification_status,
                 "certainty": cluster.certainty,
                 "verification_reason": cluster.verification_reason,
@@ -130,6 +141,64 @@ async def run_account_scan(scan_id: str, user_id: str, connection_id: str, confi
         "duplicates_found": len(dupe_clusters),
         "completed_at": datetime.now(timezone.utc).isoformat(),
         "config": {**config, "engine_stats": result.stats},
+    }).eq("id", scan_id).execute()
+
+
+async def run_account_simple_scan(scan_id: str, user_id: str, connection_id: str, config: dict, supabase):
+    """Generic Salesforce Account dedupe (real merge).
+
+    Standard fields only, so it works on ANY org (no client custom fields). Matches
+    on Website domain + account name (reusing the company matcher) and merges via the
+    Account SOAP merge. Mirrors the company pipeline.
+    """
+    connection, accounts_service, _ = await get_crm_services(
+        user_id, connection_id, object_type="accounts"
+    )
+
+    detector = CompanyDuplicateDetector(confidence_threshold=config["confidence_threshold"])
+    winner_selector = WinnerSelector(config["winner_rules"])
+    field_blender = FieldBlender(editable_fields=FieldBlender.COMPANY_FIELDS)
+
+    total = await accounts_service.get_total_accounts()
+
+    async def progress_callback(count: int):
+        progress = min(int((count / max(total, 1)) * 50), 50)  # first 50% is fetching
+        supabase.table("scans").update(
+            {"progress": progress, "records_scanned": count}
+        ).eq("id", scan_id).execute()
+
+    accounts = await accounts_service.get_all_accounts_as_companies(progress_callback)
+
+    supabase.table("scans").update(
+        {"progress": 50, "records_scanned": len(accounts)}
+    ).eq("id", scan_id).execute()
+
+    duplicate_sets = detector.find_duplicates(accounts)
+
+    for i, dup_set in enumerate(duplicate_sets):
+        all_accounts = [dup_set.winner] + dup_set.losers
+        winner, losers = winner_selector.select_winner(all_accounts)
+        merged_preview = field_blender.blend(winner, losers)
+        supabase.table("duplicate_sets").insert({
+            "id": str(uuid.uuid4()),
+            "scan_id": scan_id,
+            "confidence": dup_set.confidence,
+            "winner_record_id": winner.id,
+            "loser_record_ids": [l.id for l in losers],
+            "winner_data": winner.model_dump(mode="json"),
+            "loser_data": [l.model_dump(mode="json") for l in losers],
+            "merged_preview": merged_preview,
+        }).execute()
+        progress = 50 + int((i / max(len(duplicate_sets), 1)) * 50)
+        supabase.table("scans").update(
+            {"progress": progress, "duplicates_found": i + 1}
+        ).eq("id", scan_id).execute()
+
+    supabase.table("scans").update({
+        "status": "completed",
+        "progress": 100,
+        "duplicates_found": len(duplicate_sets),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
     }).eq("id", scan_id).execute()
 
 
@@ -206,9 +275,13 @@ async def run_scan(scan_id: str, user_id: str, connection_id: str, config: dict)
             "started_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", scan_id).execute()
 
-        # Accounts run the config-driven match engine as a view-only dry-run.
+        # Accounts: 'simple' = generic domain+name real merge (works on any org);
+        # 'config' = client-tuned MatchEngine (view-only unless dry_run=False).
         if config["object_type"] == "accounts":
-            await run_account_scan(scan_id, user_id, connection_id, config, supabase)
+            if config.get("account_engine", "simple") == "config":
+                await run_account_scan(scan_id, user_id, connection_id, config, supabase)
+            else:
+                await run_account_simple_scan(scan_id, user_id, connection_id, config, supabase)
             return
 
         # Companies run the real-merge dedupe pipeline (HubSpot), matching on

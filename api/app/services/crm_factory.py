@@ -76,11 +76,22 @@ async def get_crm_services(
         if not connection:
             raise Exception("Salesforce connection not found or expired")
 
-        # Contacts are the only Salesforce real-merge path. Accounts run as a
-        # view-only dry-run BEFORE this factory (no merge service), so the default
-        # 'contacts' request from that path is harmless. Any other object must raise,
+        # Accounts get the Account fetch + Account SOAP merge service — the merge
+        # targets the Account sObject, NEVER Contact. (The config-driven dry-run
+        # path fetches accounts directly and never reaches a merge service.)
+        if object_type == "accounts":
+            from app.services.salesforce_accounts import SalesforceAccountsService
+            from app.services.salesforce_account_merge import SalesforceAccountMergeService
+
+            return (
+                connection,
+                SalesforceAccountsService(connection),
+                SalesforceAccountMergeService(connection),
+            )
+
+        # Contacts are the only other Salesforce path. Anything else must raise,
         # never fall through to the contact merge (wrong-record deletion).
-        if object_type not in ("contacts", "accounts"):
+        if object_type != "contacts":
             raise Exception(f"Salesforce object type '{object_type}' is not supported yet.")
 
         from app.services.salesforce_contacts import SalesforceContactsService

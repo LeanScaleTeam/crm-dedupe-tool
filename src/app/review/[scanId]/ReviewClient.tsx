@@ -14,6 +14,7 @@ interface Scan {
   records_scanned: number
   duplicates_found: number
   created_at: string
+  config?: { dry_run?: boolean }
 }
 
 interface DuplicateSet {
@@ -247,8 +248,8 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
             <div className="text-sm text-red-600 mr-2">{mergeError}</div>
           )}
 
-          {/* Merge Button — disabled for accounts (view-only dry-run) */}
-          {scan.object_type === 'accounts' ? (
+          {/* Merge Button — disabled for view-only (dry-run) scans */}
+          {scan.config?.dry_run ? (
             <span className="px-4 py-2 bg-amber-100 text-amber-800 rounded-lg text-sm font-medium">
               Dry-run — view only (no merge)
             </span>

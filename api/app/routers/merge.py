@@ -59,14 +59,20 @@ async def run_merge(merge_id: str, user_id: str, scan_id: str, set_ids: List[str
             "started_at": datetime.now(timezone.utc).isoformat(),
         }).eq("id", merge_id).execute()
 
-        # Get scan to find connection + tenant + object type (tenant_id stamps the
-        # pre-merge backup; object_type routes to the correct merge service).
+        # Get scan to find connection + tenant + object type + config (tenant_id
+        # stamps the pre-merge backup; object_type routes to the correct merge
+        # service; config.dry_run gates whether merging is allowed at all).
         scan_result = supabase.table("scans").select(
-            "connection_id,tenant_id,object_type"
+            "connection_id,tenant_id,object_type,config"
         ).eq("id", scan_id).single().execute()
 
         if not scan_result.data:
             raise Exception("Scan not found")
+
+        # Backstop: never merge a view-only (dry-run) scan, even if a set was somehow
+        # approved. The API entry points reject this too.
+        if (scan_result.data.get("config") or {}).get("dry_run"):
+            raise Exception("This scan is view-only (dry-run); merge refused.")
 
         connection_id = scan_result.data["connection_id"]
         tenant_id = scan_result.data.get("tenant_id")
@@ -269,6 +275,10 @@ async def execute_merge(
     """
     supabase = get_supabase()
     scan = _assert_scan_access(supabase, request.scan_id, user_id)
+
+    # Dry-run scans are view-only — reject merge before creating a merge record.
+    if (scan.get("config") or {}).get("dry_run"):
+        raise HTTPException(status_code=400, detail="This scan is view-only (dry-run); no merge.")
 
     # The gate: approved, not excluded, not merged. Optionally narrowed to the
     # caller's set_ids — but never widened past it. (_approved_set_query already
