@@ -48,6 +48,7 @@ interface RelatedRecord {
 interface DuplicateDetailProps {
   duplicateSet: DuplicateSet
   scanId: string
+  objectType?: string
   onClose: () => void
   onPreviewUpdated?: (setId: string, updated: Record<string, unknown>) => void
 }
@@ -103,9 +104,15 @@ const METADATA_FIELDS: { key: string; label: string; format?: 'date' | 'number' 
 export default function DuplicateDetail({
   duplicateSet,
   scanId,
+  objectType,
   onClose,
   onPreviewUpdated,
 }: DuplicateDetailProps) {
+  // Lead -> Contact conversion: the survivor is ALWAYS the existing contact (you
+  // can't pick the lead as winner), so winner-swapping is disabled and the copy
+  // reads "kept contact" / "lead", not "winner" / "loser".
+  const isConversion = objectType === 'lead_conversion'
+  const accountMissing = isConversion && !!duplicateSet.merged_preview?.account_missing
   // Winner is changeable in the UI: derive it from a local winnerId (defaults to the
   // scan-selected winner). allRecords = the original winner + all losers.
   const allRecords = [duplicateSet.winner_data, ...duplicateSet.loser_data]
@@ -289,7 +296,7 @@ export default function DuplicateDetail({
           <div className="flex-shrink-0 bg-white border-b px-6 py-4 flex items-center justify-between z-10">
             <div>
               <h2 className="text-xl font-semibold text-gray-900">
-                Duplicate Set Details
+                {isConversion ? 'Lead → Contact Conversion' : 'Duplicate Set Details'}
               </h2>
               <p className="text-sm text-gray-500 mt-1">
                 {allContacts.length} records · {duplicateSet.confidence.toFixed(0)}% match
@@ -310,10 +317,27 @@ export default function DuplicateDetail({
           {/* Content */}
           <div className="p-6 overflow-auto flex-1 min-h-0">
             {/* Instructions */}
-            <div className="mb-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-800">
-              Click any field value to use it in the merged result. Use <strong>Not a duplicate</strong> on a
-              record to exclude it from the merge (it stays untouched).
-            </div>
+            {isConversion ? (
+              <div className="mb-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-800">
+                The <strong>kept contact</strong> (green) is the survivor. Approving this match converts the
+                lead into that contact — only its <strong>empty</strong> fields are filled from the lead.
+                Use <strong>Not a duplicate</strong> to skip a lead (it stays an open lead).
+              </div>
+            ) : (
+              <div className="mb-4 p-3 bg-blue-50 rounded-lg text-sm text-blue-800">
+                Click any field value to use it in the merged result. Use <strong>Not a duplicate</strong> on a
+                record to exclude it from the merge (it stays untouched).
+              </div>
+            )}
+
+            {/* Blocker: converting a lead INTO a contact needs the contact's Account. */}
+            {accountMissing && (
+              <div className="mb-4 p-3 bg-amber-50 border border-amber-200 rounded-lg text-sm text-amber-800">
+                ⚠ The matched contact isn&apos;t linked to an Account, so Salesforce can&apos;t convert this
+                lead into it. Attach the contact to an Account first, then re-scan — or mark this
+                <strong> Not a duplicate</strong> to skip it.
+              </div>
+            )}
 
             {/* Comparison Table — content area scrolls both ways so the horizontal
                 scrollbar stays pinned at the visible bottom (not the table's bottom). */}
@@ -338,20 +362,25 @@ export default function DuplicateDetail({
                         >
                           <div className="flex items-center gap-2">
                             <span className={`w-6 h-6 ${isWinnerCol ? 'bg-green-500' : 'bg-gray-400'} text-white rounded-full flex items-center justify-center text-xs font-bold`}>
-                              {isWinnerCol ? 'W' : 'L'}
+                              {isWinnerCol ? (isConversion ? 'C' : 'W') : 'L'}
                             </span>
                             <span className={isExcluded ? 'line-through text-gray-500' : ''}>{getContactName(rec)}</span>
-                            {isWinnerCol && <span className="text-xs text-green-500">(Winner)</span>}
+                            {isWinnerCol && <span className="text-xs text-green-500">{isConversion ? '(Kept contact)' : '(Winner)'}</span>}
+                            {isConversion && !isWinnerCol && <span className="text-xs text-gray-400">(Lead)</span>}
                           </div>
                           <div className="mt-0.5 text-xs font-normal text-gray-400">ID {rec.id}</div>
                           {!isWinnerCol && (
                             <div className="mt-1 flex items-center gap-3">
-                              <button
-                                onClick={() => makeWinner(rec.id)}
-                                className="text-xs font-medium text-green-600 hover:text-green-700"
-                              >
-                                ★ Make winner
-                              </button>
+                              {/* Winner-swap is meaningless for conversion — the existing
+                                  contact is always the survivor. */}
+                              {!isConversion && (
+                                <button
+                                  onClick={() => makeWinner(rec.id)}
+                                  className="text-xs font-medium text-green-600 hover:text-green-700"
+                                >
+                                  ★ Make winner
+                                </button>
+                              )}
                               <button
                                 onClick={() => toggleExcluded(rec.id)}
                                 className={`text-xs font-medium ${isExcluded ? 'text-blue-600 hover:text-blue-700' : 'text-red-500 hover:text-red-600'}`}
@@ -365,8 +394,8 @@ export default function DuplicateDetail({
                     })}
                     <th className="text-left py-3 px-4 text-sm font-medium text-blue-700 bg-blue-50">
                       <div className="flex items-center gap-2">
-                        <span className="w-6 h-6 bg-blue-500 text-white rounded-full flex items-center justify-center text-xs font-bold">M</span>
-                        Merged Result
+                        <span className="w-6 h-6 bg-blue-500 text-white rounded-full flex items-center justify-center text-xs font-bold">{isConversion ? 'C' : 'M'}</span>
+                        {isConversion ? 'Resulting Contact' : 'Merged Result'}
                       </div>
                     </th>
                   </tr>

@@ -5,4 +5,4 @@
 ALTER TABLE scans DROP CONSTRAINT scans_object_type_check;
 
 ALTER TABLE scans ADD CONSTRAINT scans_object_type_check
-    CHECK (object_type IN ('contacts', 'companies', 'deals', 'accounts', 'leads'));
+    CHECK (object_type IN ('contacts', 'companies', 'deals', 'accounts', 'leads', 'lead_conversion'));

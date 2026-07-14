@@ -262,6 +262,181 @@ async def run_company_scan(scan_id: str, user_id: str, connection_id: str, confi
     }).eq("id", scan_id).execute()
 
 
+async def run_lead_scan(scan_id: str, user_id: str, connection_id: str, config: dict, supabase):
+    """Salesforce Lead dedupe (real merge).
+
+    Leads are person-shaped, so this reuses the contact matcher (email + name) and
+    the person field blender; approved sets merge via the Lead SOAP merge(). Only
+    unconverted leads are fetched. Mirrors the contacts pipeline.
+    """
+    _, leads_service, _ = await get_crm_services(
+        user_id, connection_id, object_type="leads"
+    )
+
+    detector = DuplicateDetector(confidence_threshold=config["confidence_threshold"])
+    winner_selector = WinnerSelector(config["winner_rules"])
+    field_blender = FieldBlender()  # default person fields
+
+    total = await leads_service.get_total_leads()
+
+    async def progress_callback(count: int):
+        progress = min(int((count / max(total, 1)) * 50), 50)  # first 50% is fetching
+        supabase.table("scans").update(
+            {"progress": progress, "records_scanned": count}
+        ).eq("id", scan_id).execute()
+
+    leads = []
+    async for lead in leads_service.get_all_leads(progress_callback):
+        leads.append(lead)
+
+    supabase.table("scans").update(
+        {"progress": 50, "records_scanned": len(leads)}
+    ).eq("id", scan_id).execute()
+
+    duplicate_sets = detector.find_duplicates(leads)
+
+    for i, dup_set in enumerate(duplicate_sets):
+        all_leads = [dup_set.winner] + dup_set.losers
+        winner, losers = winner_selector.select_winner(all_leads)
+        merged_preview = field_blender.blend(winner, losers)
+        supabase.table("duplicate_sets").insert({
+            "id": str(uuid.uuid4()),
+            "scan_id": scan_id,
+            "confidence": dup_set.confidence,
+            "winner_record_id": winner.id,
+            "loser_record_ids": [l.id for l in losers],
+            "winner_data": winner.model_dump(mode="json"),
+            "loser_data": [l.model_dump(mode="json") for l in losers],
+            "merged_preview": merged_preview,
+        }).execute()
+        progress = 50 + int((i / max(len(duplicate_sets), 1)) * 50)
+        supabase.table("scans").update(
+            {"progress": progress, "duplicates_found": i + 1}
+        ).eq("id", scan_id).execute()
+
+    supabase.table("scans").update({
+        "status": "completed",
+        "progress": 100,
+        "duplicates_found": len(duplicate_sets),
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", scan_id).execute()
+
+
+async def run_lead_conversion_scan(scan_id: str, user_id: str, connection_id: str, config: dict, supabase):
+    """Match unconverted Leads against existing Contacts and stage each match as a
+    CONVERT (not a merge).
+
+    winner = the existing Contact (survivor), loser = the Lead. Approving + running
+    converts the lead INTO the contact via convertLead(), passing the contact's
+    AccountId — the fix for the 'can't convert a lead into an existing contact'
+    error. Only EMPTY contact fields are filled from the lead (SF convert behavior),
+    which the blended preview reflects. Conversion is irreversible.
+    """
+    from collections import defaultdict
+    from app.services.salesforce_contacts import SalesforceContactsService
+
+    connection, leads_service, convert_service = await get_crm_services(
+        user_id, connection_id, object_type="lead_conversion"
+    )
+    contacts_service = SalesforceContactsService(connection)
+
+    # Reuse the person matcher's scoring (email 60% / name 40%) across objects.
+    detector = DuplicateDetector(confidence_threshold=config["confidence_threshold"])
+    field_blender = FieldBlender()
+    threshold = config["confidence_threshold"]
+
+    # A converted LeadStatus is required to convert; resolve once (stored per set).
+    converted_status = await convert_service.get_converted_status()
+
+    total_leads = await leads_service.get_total_leads()
+
+    async def progress_callback(count: int):
+        progress = min(int((count / max(total_leads, 1)) * 40), 40)  # first 40% = leads
+        supabase.table("scans").update(
+            {"progress": progress, "records_scanned": count}
+        ).eq("id", scan_id).execute()
+
+    leads = []
+    async for lead in leads_service.get_all_leads(progress_callback):
+        leads.append(lead)
+
+    # Fetch existing contacts (SELECT now includes AccountId) and block-index them.
+    contacts = []
+    async for contact in contacts_service.get_all_contacts():
+        contacts.append(contact)
+
+    supabase.table("scans").update(
+        {"progress": 60, "records_scanned": len(leads)}
+    ).eq("id", scan_id).execute()
+
+    email_index: dict = defaultdict(list)
+    name_index: dict = defaultdict(list)
+    for c in contacts:
+        if c.normalized_email:
+            email_index[c.normalized_email].append(c)
+        if c.name_prefix:
+            name_index[c.name_prefix].append(c)
+
+    matches = 0
+    for i, lead in enumerate(leads):
+        # Candidate contacts from the same email / name-prefix blocks.
+        candidates: dict = {}
+        if lead.normalized_email:
+            for c in email_index.get(lead.normalized_email, []):
+                candidates[c.id] = c
+        if lead.name_prefix:
+            for c in name_index.get(lead.name_prefix, []):
+                candidates[c.id] = c
+        if not candidates:
+            continue
+
+        best_contact = None
+        best_score = 0.0
+        for c in candidates.values():
+            score = detector._calculate_similarity(lead, c)
+            if score > best_score:
+                best_score, best_contact = score, c
+
+        if not best_contact or best_score < threshold:
+            continue
+
+        # winner = existing Contact; loser = the Lead converted into it.
+        display = field_blender.blend(best_contact, [lead])
+        account_id = (best_contact.raw_properties or {}).get("AccountId")
+        merged_preview = {
+            **display,
+            "conversion": True,
+            "contact_id": best_contact.id,
+            "lead_id": lead.id,
+            "account_id": account_id,          # required to convert into this contact
+            "converted_status": converted_status,
+            "account_missing": not account_id,  # surfaced as a warning in review
+        }
+        supabase.table("duplicate_sets").insert({
+            "id": str(uuid.uuid4()),
+            "scan_id": scan_id,
+            "confidence": round(best_score * 100, 2),
+            "winner_record_id": best_contact.id,
+            "loser_record_ids": [lead.id],
+            "winner_data": best_contact.model_dump(mode="json"),
+            "loser_data": [lead.model_dump(mode="json")],
+            "merged_preview": merged_preview,
+        }).execute()
+        matches += 1
+        if i % 25 == 0:
+            progress = 60 + int((i / max(len(leads), 1)) * 40)
+            supabase.table("scans").update(
+                {"progress": progress, "duplicates_found": matches}
+            ).eq("id", scan_id).execute()
+
+    supabase.table("scans").update({
+        "status": "completed",
+        "progress": 100,
+        "duplicates_found": matches,
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    }).eq("id", scan_id).execute()
+
+
 async def run_scan(scan_id: str, user_id: str, connection_id: str, config: dict):
     """
     Background task to run the duplicate detection scan.
@@ -282,6 +457,18 @@ async def run_scan(scan_id: str, user_id: str, connection_id: str, config: dict)
                 await run_account_scan(scan_id, user_id, connection_id, config, supabase)
             else:
                 await run_account_simple_scan(scan_id, user_id, connection_id, config, supabase)
+            return
+
+        # Leads dedupe (Salesforce): person-shaped, reuses the contact matcher and
+        # merges via the Lead SOAP merge().
+        if config["object_type"] == "leads":
+            await run_lead_scan(scan_id, user_id, connection_id, config, supabase)
+            return
+
+        # Lead -> existing Contact conversion (Salesforce): cross-object match, staged
+        # as a convert (not a merge). NEVER falls through to the contacts pipeline.
+        if config["object_type"] == "lead_conversion":
+            await run_lead_conversion_scan(scan_id, user_id, connection_id, config, supabase)
             return
 
         # Companies run the real-merge dedupe pipeline (HubSpot), matching on
@@ -629,7 +816,9 @@ async def get_editable_fields(
         return {"fields": await get_writable_properties(connection.access_token, hs_object)}
 
     if crm_type == "salesforce":
-        sobject = {"contacts": "Contact", "accounts": "Account"}.get(object_type)
+        # lead_conversion has no editable-field step (it converts, it doesn't blend),
+        # so it's intentionally absent -> {"fields": []}.
+        sobject = {"contacts": "Contact", "accounts": "Account", "leads": "Lead"}.get(object_type)
         if not sobject:
             return {"fields": []}
         connection, _, _ = await get_crm_services(user_id, connection_id, object_type=object_type)

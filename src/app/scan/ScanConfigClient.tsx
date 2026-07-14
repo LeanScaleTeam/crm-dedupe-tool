@@ -16,7 +16,7 @@ interface ScanConfigClientProps {
   connection: CrmConnection
 }
 
-type ObjectType = 'contacts' | 'accounts' | 'companies' | 'deals'
+type ObjectType = 'contacts' | 'accounts' | 'companies' | 'deals' | 'leads' | 'lead_conversion'
 type WinnerRuleType = 'oldest_created' | 'most_recent' | 'most_associations' | 'custom_field' | 'none'
 
 interface WinnerRule {
@@ -39,9 +39,21 @@ const objectTypesForCrm = (
   }
   return [
     { value: 'contacts', label: 'Contacts', description: 'People records in your CRM', available: true },
+    { value: 'leads', label: 'Leads', description: 'Lead records — matched & merged by email and name', available: true },
     { value: 'accounts', label: 'Accounts', description: 'Organization records — config-driven match, view-only (dry-run)', available: true },
+    { value: 'lead_conversion', label: 'Leads → Contacts (convert)', description: 'Match leads to existing contacts and convert each lead into its matched contact', available: true },
     { value: 'deals', label: 'Deals', description: 'Sales pipeline records', available: false },
   ]
+}
+
+// Human label for an object type (used in the "what happens next" copy).
+const OBJECT_LABEL: Record<ObjectType, string> = {
+  contacts: 'contacts',
+  leads: 'leads',
+  accounts: 'accounts',
+  companies: 'companies',
+  deals: 'deals',
+  lead_conversion: 'leads',
 }
 
 const ACCOUNT_PROFILES: { value: string; label: string }[] = [
@@ -233,7 +245,29 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
             </div>
           )}
 
-          {/* Winner Rules */}
+          {/* Lead -> Contact conversion explainer */}
+          {objectType === 'lead_conversion' && (
+            <div className="bg-white rounded-lg shadow p-6 space-y-3">
+              <h2 className="text-lg font-semibold text-gray-900">Lead → Contact Conversion</h2>
+              <p className="text-sm text-gray-600">
+                We match each unconverted lead against your existing contacts (by email and name).
+                For every match you approve, the lead is <strong>converted into that existing contact</strong> —
+                passing the contact&apos;s account so it works even when the contact already exists
+                (the usual API blocker). Only <strong>empty</strong> fields on the contact are filled from the lead.
+              </p>
+              <div className="bg-amber-50 border border-amber-200 rounded-md p-3">
+                <p className="text-sm text-amber-800">
+                  ⚠ Conversion is <strong>irreversible</strong> — a converted lead becomes read-only in Salesforce.
+                  Nothing runs until you review and approve each match. A pre-action snapshot of every lead is
+                  captured for your records. No new opportunities are created.
+                </p>
+              </div>
+            </div>
+          )}
+
+          {/* Winner Rules — the survivor selection doesn't apply to conversion
+              (the existing contact is always the survivor), so it's hidden there. */}
+          {objectType !== 'lead_conversion' && (
           <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-2">
               2. Configure Winner Rules
@@ -288,11 +322,12 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
               ))}
             </div>
           </div>
+          )}
 
           {/* Confidence Threshold */}
           <div className="bg-white rounded-lg shadow p-6">
             <h2 className="text-lg font-semibold text-gray-900 mb-2">
-              3. Match Confidence Threshold
+              {objectType === 'lead_conversion' ? '2. Match Confidence Threshold' : '3. Match Confidence Threshold'}
             </h2>
             <p className="text-sm text-gray-500 mb-4">
               Only records with similarity above this threshold will be flagged as duplicates.
@@ -340,10 +375,20 @@ export default function ScanConfigClient({ connection }: ScanConfigClientProps) 
           <div className="bg-yellow-50 rounded-lg p-4">
             <h3 className="font-medium text-yellow-900 mb-2">What happens next?</h3>
             <ul className="text-sm text-yellow-800 space-y-1 list-disc list-inside">
-              <li>We&apos;ll fetch all {objectType} from your CRM</li>
-              <li>Duplicates will be detected using fuzzy matching on {objectType === 'companies' || objectType === 'accounts' ? 'name and web domain' : 'names and emails'}</li>
-              <li>You&apos;ll review each duplicate set before any changes are made</li>
-              <li>This process is safe - no data is modified until you approve</li>
+              <li>We&apos;ll fetch all {OBJECT_LABEL[objectType]} from your CRM</li>
+              {objectType === 'lead_conversion' ? (
+                <>
+                  <li>Each lead is matched to your existing contacts using fuzzy matching on names and emails</li>
+                  <li>You&apos;ll review each match before any lead is converted</li>
+                  <li>This process is safe — nothing is converted until you approve</li>
+                </>
+              ) : (
+                <>
+                  <li>Duplicates will be detected using fuzzy matching on {objectType === 'companies' || objectType === 'accounts' ? 'name and web domain' : 'names and emails'}</li>
+                  <li>You&apos;ll review each duplicate set before any changes are made</li>
+                  <li>This process is safe - no data is modified until you approve</li>
+                </>
+              )}
             </ul>
           </div>
         </div>

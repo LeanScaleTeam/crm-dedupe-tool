@@ -205,6 +205,11 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
 
   const filteredSets = getFilteredSets()
   const nonExcludedCount = filteredSets.filter(s => !s.excluded).length
+  // Lead -> Contact conversion reads differently from a same-object merge: the
+  // action is "convert", the survivor is always the existing contact, and the
+  // source records are leads.
+  const isConversion = scan.object_type === 'lead_conversion'
+  const actionVerb = isConversion ? 'Convert' : 'Merge'
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -220,9 +225,13 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
           </button>
           <div className="flex justify-between items-start">
             <div>
-              <h1 className="text-2xl font-bold text-gray-900">Review Duplicates</h1>
+              <h1 className="text-2xl font-bold text-gray-900">
+                {isConversion ? 'Review Lead → Contact Matches' : 'Review Duplicates'}
+              </h1>
               <p className="text-gray-600 mt-1">
-                Found {scan.duplicates_found} duplicate sets from {scan.records_scanned.toLocaleString()} {scan.object_type}
+                {isConversion
+                  ? `Found ${scan.duplicates_found} lead→contact matches across ${scan.records_scanned.toLocaleString()} leads`
+                  : `Found ${scan.duplicates_found} duplicate sets from ${scan.records_scanned.toLocaleString()} ${scan.object_type}`}
               </p>
             </div>
             <div className="text-right">
@@ -294,7 +303,7 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
               disabled={selectedSets.size === 0 || isMerging}
               className="px-6 py-2 bg-blue-600 text-white rounded-lg font-medium hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {isMerging ? 'Starting merge...' : `Merge ${selectedSets.size} selected`}
+              {isMerging ? `Starting ${actionVerb.toLowerCase()}...` : `${actionVerb} ${selectedSets.size} selected`}
             </button>
           )}
         </div>
@@ -361,6 +370,7 @@ export default function ReviewClient({ scan }: ReviewClientProps) {
           <DuplicateDetail
             duplicateSet={expandedSet}
             scanId={scan.id}
+            objectType={scan.object_type}
             onClose={() => setExpandedSet(null)}
             onPreviewUpdated={(setId, updated) => {
               // Merge the full saved row (winner_record_id / winner_data / loser_data

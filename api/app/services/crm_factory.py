@@ -89,6 +89,32 @@ async def get_crm_services(
                 SalesforceAccountMergeService(connection),
             )
 
+        # Leads dedupe: person-shaped, so the fetch service maps leads onto the
+        # Contact model and the merge service targets the Lead sObject (SOAP merge()
+        # supports Lead) — NEVER the Contact merge.
+        if object_type == "leads":
+            from app.services.salesforce_leads import SalesforceLeadsService
+            from app.services.salesforce_lead_merge import SalesforceLeadMergeService
+
+            return (
+                connection,
+                SalesforceLeadsService(connection),
+                SalesforceLeadMergeService(connection),
+            )
+
+        # Lead -> existing Contact conversion (cross-object). The "merge service" here
+        # is the convert service, which shares the merge_duplicate_set contract so
+        # run_merge drives it unchanged (winner=Contact, loser=Lead, convertLead()).
+        if object_type == "lead_conversion":
+            from app.services.salesforce_leads import SalesforceLeadsService
+            from app.services.salesforce_lead_convert import SalesforceLeadConvertService
+
+            return (
+                connection,
+                SalesforceLeadsService(connection),
+                SalesforceLeadConvertService(connection),
+            )
+
         # Contacts are the only other Salesforce path. Anything else must raise,
         # never fall through to the contact merge (wrong-record deletion).
         if object_type != "contacts":

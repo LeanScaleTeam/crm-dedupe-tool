@@ -175,7 +175,7 @@ CREATE TRIGGER update_crm_connections_updated_at
 ALTER TABLE scans DROP CONSTRAINT scans_object_type_check;
 
 ALTER TABLE scans ADD CONSTRAINT scans_object_type_check
-    CHECK (object_type IN ('contacts', 'companies', 'deals', 'accounts', 'leads'));
+    CHECK (object_type IN ('contacts', 'companies', 'deals', 'accounts', 'leads', 'lead_conversion'));
 
 -- ============================================================================
 -- 003_phase0_merge_safety.sql
